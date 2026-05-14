@@ -1,0 +1,7 @@
+.build/
+.swiftpm/
+*.xcodeproj/
+DerivedData/
+TalkeoSelect.app/
+.DS_Store
+config.local.json

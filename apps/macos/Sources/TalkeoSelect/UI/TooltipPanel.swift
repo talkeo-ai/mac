@@ -1,0 +1,297 @@
+import AppKit
+import SwiftUI
+
+/// Floating non-activating chip that expands into a vertical menu on hover.
+/// Anchors the top-left corner so the first menu row sits exactly where the
+/// collapsed chip was — i.e. the cursor lands on row 1 the moment it expands.
+final class TooltipPanel {
+    private let panel: NSPanel
+    private let hosting: NSHostingView<TooltipView>
+    private let model: TooltipModel
+    private var dismissMonitor: Any?
+    private var leftAnchor: CGFloat = 0
+    private var topAnchor: CGFloat = 0
+
+    private static let collapsedSize = NSSize(width: 44, height: 44)
+    private static let maxSize = NSSize(width: 240, height: 220)
+
+    init() {
+        let model = TooltipModel()
+        self.model = model
+
+        let panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: Self.maxSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.level = .popUpMenu
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.hasShadow = false
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+
+        var onResizeRef: ((CGSize) -> Void)?
+        let view = TooltipView(model: model) { size in
+            onResizeRef?(size)
+        }
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(origin: .zero, size: Self.maxSize)
+        panel.contentView = hosting
+
+        self.panel = panel
+        self.hosting = hosting
+
+        onResizeRef = { [weak self] size in
+            self?.resizePanel(to: size)
+        }
+    }
+
+    func show(text: String, near point: NSPoint) {
+        model.text = text
+        model.isExpanded = false
+        let origin = clampedOrigin(near: point, size: Self.collapsedSize)
+        leftAnchor = origin.x
+        topAnchor = origin.y + Self.collapsedSize.height // bottom-left coords → top edge
+        panel.setFrame(NSRect(origin: origin, size: Self.collapsedSize), display: true)
+        panel.orderFrontRegardless()
+        installDismissMonitor()
+    }
+
+    func hide() {
+        panel.orderOut(nil)
+        removeDismissMonitor()
+    }
+
+    /// Called on every SwiftUI layout pass (incl. each animation frame).
+    /// Top-left anchored: width grows rightward, height grows downward.
+    private func resizePanel(to size: CGSize) {
+        let width = min(max(size.width, Self.collapsedSize.width), Self.maxSize.width)
+        let height = min(max(size.height, Self.collapsedSize.height), Self.maxSize.height)
+        var origin = NSPoint(x: leftAnchor, y: topAnchor - height)
+
+        let screen = NSScreen.screens.first { $0.frame.contains(NSPoint(x: leftAnchor, y: topAnchor)) } ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        if origin.x + width > visible.maxX { origin.x = visible.maxX - width - 4 }
+        if origin.y < visible.minY { origin.y = visible.minY + 4 }
+
+        panel.setFrame(NSRect(origin: origin, size: NSSize(width: width, height: height)), display: true, animate: false)
+    }
+
+    private func installDismissMonitor() {
+        removeDismissMonitor()
+        dismissMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] _ in
+            self?.hide()
+        }
+    }
+
+    private func removeDismissMonitor() {
+        if let monitor = dismissMonitor {
+            NSEvent.removeMonitor(monitor)
+            dismissMonitor = nil
+        }
+    }
+
+    private func clampedOrigin(near point: NSPoint, size: NSSize) -> NSPoint {
+        let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+
+        var x = point.x + 10
+        var y = point.y - size.height - 10
+
+        // Pre-bias: leave space for the expanded menu growing rightward + down
+        if x + Self.maxSize.width > visible.maxX { x = point.x - Self.maxSize.width - 10 }
+        if x < visible.minX { x = visible.minX + 6 }
+        if y - (Self.maxSize.height - size.height) < visible.minY { y = point.y + 14 }
+        if y + size.height > visible.maxY { y = visible.maxY - size.height - 6 }
+        return NSPoint(x: x, y: y)
+    }
+}
+
+// MARK: - SwiftUI content
+
+final class TooltipModel: ObservableObject {
+    @Published var text: String = ""
+    @Published var isExpanded: Bool = false
+}
+
+private struct SizePreferenceKey: PreferenceKey {
+    static var defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        let next = nextValue()
+        if next != .zero { value = next }
+    }
+}
+
+private enum Brand {
+    static let iconImage: NSImage? = {
+        guard let url = Bundle.main.url(forResource: "icon", withExtension: "png") else { return nil }
+        return NSImage(contentsOf: url)
+    }()
+}
+
+struct TooltipView: View {
+    @ObservedObject var model: TooltipModel
+    let onResize: (CGSize) -> Void
+
+    var body: some View {
+        container
+            .fixedSize()
+            .background(
+                GeometryReader { geo in
+                    Color.clear.preference(key: SizePreferenceKey.self, value: geo.size)
+                }
+            )
+            .onPreferenceChange(SizePreferenceKey.self) { size in
+                onResize(size)
+            }
+    }
+
+    @ViewBuilder
+    private var container: some View {
+        if model.isExpanded {
+            menuView
+        } else {
+            collapsedChip
+        }
+    }
+
+    private var collapsedChip: some View {
+        BrandIcon()
+            .frame(width: 32, height: 32)
+            .padding(6)
+            .background(pillBackground(corner: 12))
+            .onHover { hovering in
+                guard hovering, !model.isExpanded else { return }
+                withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
+                    model.isExpanded = true
+                }
+            }
+    }
+
+    private var menuView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            MenuRow(
+                kind: .system("camera.viewfinder"),
+                title: "Capture text",
+                subtitle: "OCR on a screen region"
+            ) {
+                // TODO: screenshot + Vision OCR
+            }
+            Divider().opacity(0.4)
+            MenuRow(
+                kind: .system("arrow.left.arrow.right"),
+                title: "Switch language",
+                subtitle: "Auto ES ⇄ EN"
+            ) {
+                // TODO: Groq translate w/ language detection
+            }
+            Divider().opacity(0.4)
+            MenuRow(
+                kind: .system("wand.and.stars"),
+                title: "Improve copy",
+                subtitle: "Polish the selected text"
+            ) {
+                // TODO: Groq rewrite + replace-in-place
+            }
+            Divider().opacity(0.4)
+            MenuRow(
+                kind: .brand,
+                title: "Open TalkeoSelect",
+                subtitle: "Settings & history"
+            ) {
+                // TODO: open main window
+            }
+        }
+        .frame(width: 224)
+        .padding(4)
+        .background(pillBackground(corner: 14))
+    }
+
+    private func pillBackground(corner: CGFloat) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                .fill(.ultraThinMaterial)
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 10, y: 3)
+    }
+}
+
+private enum MenuIcon {
+    case system(String)
+    case brand
+}
+
+private struct MenuRow: View {
+    let kind: MenuIcon
+    let title: String
+    let subtitle: String
+    let action: () -> Void
+    @State private var isHover = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                iconView
+                    .frame(width: 22, height: 22)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(.primary)
+                    Text(subtitle)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isHover ? Color.primary.opacity(0.10) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHover = $0 }
+    }
+
+    @ViewBuilder
+    private var iconView: some View {
+        switch kind {
+        case .system(let name):
+            Image(systemName: name)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.primary)
+        case .brand:
+            BrandIcon()
+        }
+    }
+}
+
+private struct BrandIcon: View {
+    var body: some View {
+        Group {
+            if let nsImage = Brand.iconImage {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFill()
+            } else {
+                Image(systemName: "text.viewfinder")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary)
+            }
+        }
+        .clipShape(Circle())
+        .overlay(Circle().stroke(Color.primary.opacity(0.10), lineWidth: 0.5))
+    }
+}
