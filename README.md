@@ -21,7 +21,7 @@ Open source (MIT). Free with your own API keys, or opt in to **Talkeo Cloud** fo
 ```bash
 cd apps/macos
 ./scripts/build-app.sh
-open ./TalkeoSelect.app   # binary rename to Talkeo.app pending
+open ./Talkeo.app
 ```
 
 macOS will request **Accessibility permission** on first launch. Approve it and restart the app (CGEventTap caches state per process).

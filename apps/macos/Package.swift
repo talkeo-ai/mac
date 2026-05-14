@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "TalkeoSelect",
+    name: "Talkeo",
     platforms: [.macOS(.v13)],
     targets: [
         .executableTarget(
-            name: "TalkeoSelect",
-            path: "Sources/TalkeoSelect"
+            name: "Talkeo",
+            path: "Sources/Talkeo"
         )
     ]
 )

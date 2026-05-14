@@ -2,6 +2,6 @@
 .swiftpm/
 *.xcodeproj/
 DerivedData/
-TalkeoSelect.app/
+Talkeo.app/
 .DS_Store
 config.local.json

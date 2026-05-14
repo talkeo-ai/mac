@@ -2,8 +2,6 @@
 
 Native popup AI assistant on macOS — text selection detection + floating tooltip + AI actions.
 
-> Swift target/module is still named `TalkeoSelect` pending rename to `Talkeo`. Build artifact below reflects current state.
-
 ## Requirements
 
 - macOS 13+
@@ -13,7 +11,7 @@ Native popup AI assistant on macOS — text selection detection + floating toolt
 
 ```bash
 ./scripts/build-app.sh
-open ./TalkeoSelect.app   # rename to Talkeo.app pending
+open ./Talkeo.app
 ```
 
 First launch:
@@ -27,7 +25,7 @@ Test by selecting text in Safari, Notes, TextEdit. Tooltip appears on mouse-up.
 ## Architecture (Swift module)
 
 ```
-Sources/TalkeoSelect/
+Sources/Talkeo/
 ├── main.swift                          # NSApplication entry
 ├── App/
 │   ├── AppDelegate.swift               # permissions + monitor + tooltip orchestration

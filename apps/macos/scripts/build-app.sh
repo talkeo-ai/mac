@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-APP_NAME="TalkeoSelect"
+APP_NAME="Talkeo"
 BUILD_CONFIG="release"
 BIN_PATH=".build/$BUILD_CONFIG/$APP_NAME"
 APP_BUNDLE="$APP_NAME.app"
