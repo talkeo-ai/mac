@@ -202,7 +202,7 @@ struct TooltipView: View {
             Divider().opacity(0.4)
             MenuRow(
                 kind: .brand,
-                title: "Open TalkeoSelect",
+                title: "Open Talkeo",
                 subtitle: "Settings & history"
             ) {
                 // TODO: open main window

@@ -19,7 +19,7 @@ final class StatusBarController {
 
     private func configureButton() {
         if let button = statusItem.button {
-            let image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: "TalkeoSelect")
+            let image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: "Talkeo")
             image?.isTemplate = true
             button.image = image
         }
@@ -36,14 +36,14 @@ final class StatusBarController {
 
         menu.addItem(.separator())
 
-        let perm = NSMenuItem(title: "Solicitar permiso de Accesibilidad", action: #selector(MenuActions.requestPermission(_:)), keyEquivalent: "")
+        let perm = NSMenuItem(title: "Request Accessibility permission", action: #selector(MenuActions.requestPermission(_:)), keyEquivalent: "")
         perm.target = MenuActions.shared
         MenuActions.shared.controller = self
         menu.addItem(perm)
 
         menu.addItem(.separator())
 
-        let quitItem = NSMenuItem(title: "Quit TalkeoSelect", action: #selector(MenuActions.quit(_:)), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Quit Talkeo", action: #selector(MenuActions.quit(_:)), keyEquivalent: "q")
         quitItem.target = MenuActions.shared
         menu.addItem(quitItem)
 
@@ -51,7 +51,7 @@ final class StatusBarController {
     }
 
     fileprivate func statusLine() -> String {
-        isTrusted() ? "TalkeoSelect · listo" : "TalkeoSelect · sin permiso"
+        isTrusted() ? "Talkeo · ready" : "Talkeo · no permission"
     }
 
     fileprivate func refreshStatus() {

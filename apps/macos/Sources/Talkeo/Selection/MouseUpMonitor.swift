@@ -38,7 +38,7 @@ final class MouseUpMonitor {
             },
             userInfo: refcon
         ) else {
-            NSLog("[TalkeoSelect] CGEvent.tapCreate failed — Accessibility permission missing?")
+            NSLog("[Talkeo] CGEvent.tapCreate failed — Accessibility permission missing?")
             return
         }
 
@@ -49,7 +49,7 @@ final class MouseUpMonitor {
         eventTap = tap
         runLoopSource = source
         started = true
-        NSLog("[TalkeoSelect] mouse monitor started")
+        NSLog("[Talkeo] mouse monitor started")
     }
 
     private func handle(type: CGEventType, event: CGEvent) {

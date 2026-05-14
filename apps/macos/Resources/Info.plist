@@ -5,15 +5,15 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>TalkeoSelect</string>
+    <string>Talkeo</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.joaquin.talkeoselect</string>
+    <string>dev.joaquin.talkeo</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>TalkeoSelect</string>
+    <string>Talkeo</string>
     <key>CFBundleDisplayName</key>
-    <string>TalkeoSelect</string>
+    <string>Talkeo</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -27,6 +27,6 @@
     <key>NSHumanReadableCopyright</key>
     <string>Personal use.</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>TalkeoSelect necesita enviar eventos para leer y reemplazar el texto seleccionado.</string>
+    <string>Talkeo needs to send events to read and replace the selected text.</string>
 </dict>
 </plist>
