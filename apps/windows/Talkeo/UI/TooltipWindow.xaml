@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Talkeo.UI.TooltipWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+          BorderBrush="{ThemeResource SurfaceStrokeColorDefaultBrush}"
+          BorderThickness="1"
+          CornerRadius="8"
+          Padding="8">
+        <StackPanel Spacing="8" MinWidth="240">
+            <TextBlock x:Name="SelectedTextBlock"
+                       TextWrapping="Wrap"
+                       MaxWidth="320"
+                       MaxLines="3"
+                       TextTrimming="CharacterEllipsis"
+                       FontSize="12"
+                       Opacity="0.85" />
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <Button x:Name="TranslateButton" Content="Translate" Click="OnTranslateClick" />
+                <Button x:Name="ImproveButton"   Content="Improve"   Click="OnImproveClick" />
+                <Button x:Name="DefineButton"    Content="Define"    Click="OnDefineClick" />
+                <Button x:Name="PronounceButton" Content="Pronounce" Click="OnPronounceClick" />
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</Window>
