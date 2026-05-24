@@ -1,31 +1,38 @@
 # Architecture
 
-> Cross-platform architectural conventions. Platform-specific details live in `apps/<platform>/`.
+> Architectural conventions for the Talkeo Mac app. Ecosystem-wide context (Talkeo Cloud backend, GitHub org, provider strategy at the org level) lives in `ECOSYSTEM.md`.
 
 ## Overview
 
-Talkeo is a native popup AI assistant. Each platform implements the same UX in its native stack — no shared application code across platforms. What's shared:
-
-- **API contracts** for providers (LLM / TTS / STT) — `shared/api-contract/`
-- **System prompts** — `shared/prompts/`
-- **Design tokens and UX conventions** — `shared/design/`
-
-The shared specs prevent drift between platforms while letting each platform feel native.
+Talkeo for Mac is a native AI tutoring app with multiple feature modes (TalkeoSelect popup, Practice with Leo, History, Vocab review). It is implemented in Swift, SwiftUI, and AppKit. The app consumes the Talkeo Cloud backend via HTTPS for managed-provider scenarios; in self-hosted mode, it talks directly to user-configured providers.
 
 ## Provider model
 
-The core abstraction is the **provider protocol**. Each capability (LLM, TTS, STT) has an interface. Implementations live behind it:
+The core abstraction is the **provider protocol**. Each capability (LLM, TTS, STT) has an interface. Implementations live behind it.
 
-- **BYO providers** — concrete implementations that talk directly to a provider's API using a user-supplied key. Each provider declares its own descriptor (id, label, required fields) at registration time. New providers added by contributors register themselves the same way.
-- **TalkeoCloudProvider** — paid, zero-config. Logs in with a Talkeo account, makes requests against `api.talkeo.cloud`. Provider name/model/voice details abstracted server-side.
+### Two modes of operation
 
-UI and action logic talk only to the protocol, never to a concrete provider. Swapping providers is a runtime decision based on user settings.
+**BYO providers (self-hosted, code public):**
 
-This means:
+- Concrete implementations that talk directly to a provider's API using a user-supplied key.
+- Each adapter declares its own descriptor (id, label, required fields) at registration time.
+- This repo ships one or two reference adapters as examples (educational, contributors can model their own after these).
+- Users see and pick the actual provider plus model/voice id. Transparency.
 
-- Adding a new BYO provider = new implementation + descriptor registration. No changes to UI or action logic.
-- TalkeoCloudProvider is structurally indistinguishable from BYO providers — just another implementation of the same protocol.
-- Users can mix: BYO provider for LLM, TalkeoCloud for TTS, or any combination.
+**Talkeo Cloud (managed, routing private):**
+
+- The app implements a `TalkeoCloudProvider` that calls `api.talkeo.cloud` over HTTPS, versioned as `/v1/...`.
+- Server-side, Talkeo Cloud routes requests to underlying external providers through a private Gateway. **Which providers are used, in what combination, with what fallback chain, none of this is visible in the app or in the public backend code.** It lives in a private `talkeo-ai/gateway` repository. See `ECOSYSTEM.md`.
+- Users see "Talkeo Cloud" as a single provider option. They do not see what underlying providers are used behind the scenes.
+
+### Implications
+
+- UI and action logic talk only to the protocol, never to a concrete provider implementation.
+- Swapping providers (BYO vs Talkeo Cloud, or between BYO options) is a runtime decision based on user settings.
+- Adding a new BYO provider equals new adapter plus descriptor registration. No changes to UI or action logic.
+- `TalkeoCloudProvider` is structurally indistinguishable from BYO adapters from the app's perspective. Just another implementation of the same protocol.
+- Users can mix: BYO for LLM, Talkeo Cloud for TTS, or any combination per capability.
+- **The app must never expose, log, or signal which underlying providers Talkeo Cloud uses internally.** Even if a contributor adds debug logging in a BYO adapter, that's fine (it's their own provider). But never add code that would leak Talkeo Cloud's internal provider choices.
 
 ## Settings
 
@@ -48,35 +55,67 @@ The file always carries a `schema_version` field. When the schema changes, a mig
 }
 ```
 
-`<provider_id>` is whichever provider id the user selected (BYO providers declare their own ids when registered; `talkeo_cloud` is reserved for the Talkeo Cloud client).
+`<provider_id>` is whichever provider id the user selected (BYO adapters declare their own ids when registered; `talkeo_cloud` is reserved for the Talkeo Cloud client).
 
-API keys never leave the local machine unless explicitly used by a BYO provider's HTTP call.
+API keys never leave the local machine unless explicitly used by a BYO adapter's HTTP call or the Talkeo Cloud auth flow.
 
-## BYO ↔ Talkeo Cloud coexistence (non-negotiable)
+## BYO and Talkeo Cloud coexistence (non-negotiable)
 
 1. **BYO is first-class always.** Talkeo Cloud is opt-in convenience, never lock-in.
 2. **UI switcher:** dropdown per capability. User picks BYO provider or Talkeo Cloud independently per LLM/TTS/STT.
-3. **Talkeo Cloud abstracts internals.** Users see "Talkeo" as a brand. They don't see what underlying LLM / voice model we use behind the scenes (we may swap them freely server-side).
-4. **BYO names providers explicitly.** Users see and pick the actual provider + model/voice id. Transparency.
+3. **Talkeo Cloud abstracts internals.** Users see "Talkeo Cloud" as a single option. They do not see (and the code does not reveal) what underlying providers are routed to server-side. Talkeo may swap or recombine these freely.
+4. **BYO names providers explicitly.** Users see and pick the actual provider plus model/voice id. Transparency for the BYO mode.
 5. **No degradation on switch.** Core functionality works identically regardless of provider choice.
 
 ## Versioning of the Talkeo Cloud API
 
 The Talkeo Cloud HTTP API is versioned in the URL: `/v1/llm/complete`, `/v1/tts/synthesize`, etc.
 
-We never break `v1` once distributed clients exist in the wild. Breaking changes go to `v2`, with `v1` maintained until clients have migrated.
+`v1` is preserved once distributed clients exist in the wild. Breaking changes go to `v2`, with `v1` maintained until clients have migrated.
+
+This versioning enables backend migrations (for example, the current fly.io to AWS migration documented in `ECOSYSTEM.md`) without breaking deployed clients.
 
 ## Storage
 
-Local storage (SQLite) holds:
+Local storage (SQLite or equivalent) holds:
 
 - User queries (text selected, action invoked, result, timestamp).
-- Provider history (which provider was used per query).
+- Provider used per query (BYO adapter id or `talkeo_cloud`).
 
-This is the foundation for future personalization features (forced practice on captured weak areas, vocabulary tracking, etc.).
+This is the foundation for future personalization features (forced practice on captured weak areas, vocabulary tracking, spaced repetition).
 
-Storage is platform-agnostic at the schema level (`shared/`), platform-specific at the implementation level (`apps/<platform>/`).
+When the user is logged into Talkeo Cloud, captured selections are also synced to the Cloud's `selections` table (server-side) for use in practice session generation. Local SQLite remains the source of truth for offline use.
 
-## Per-platform implementation notes
+## App surfaces and activation
 
-Detailed engineering notes for each platform live in `apps/<platform>/CLAUDE.md` and `apps/<platform>/README.md`.
+Talkeo for Mac is a **foreground app with two persistent surfaces**, both always present from launch:
+
+1. **Dock icon.** The "real" app entry point. Clicking it brings the main window to the front.
+2. **Status bar (menubar) icon.** Always visible. Owns its own configuration menu (settings, provider switch, quit), independent of the main window.
+
+This is the Claude desktop / Slack / Discord pattern, not a background-only agent tool.
+
+**Main window:** the user-facing destination opened by the Dock icon.
+
+- v0.1 main window equals **Settings panel** (provider configuration, API keys, BYO vs Talkeo Cloud switch).
+- v0.3 and beyond replaces this with the **Practice mode dashboard**, and Settings moves to a secondary window opened via the standard preferences shortcut (`Cmd+,`).
+
+**Why both surfaces:** the TalkeoSelect popup mode (core daily-use) doesn't need a main window. It operates entirely through the floating panel triggered by text selection. But Practice mode (v0.3 and beyond) needs a real destination. Having both surfaces from v0.1 avoids a UX rupture later and matches user expectations for a real desktop app.
+
+**Implementation notes:**
+
+- `NSApp.setActivationPolicy(.regular)` plus status bar item via `NSStatusBar`.
+- `Info.plist` must NOT set `LSUIElement`.
+- `AppDelegate.applicationShouldHandleReopen(_:hasVisibleWindows:)` must show/focus the main window on Dock click.
+
+## Feature modes inside the app
+
+Talkeo is one app with multiple modes. Internal organization reflects this:
+
+- `Sources/Talkeo/Features/Select/`, TalkeoSelect popup feature (current MVP).
+- `Sources/Talkeo/Features/Practice/`, Practice mode with Leo (planned, v0.3).
+- `Sources/Talkeo/Features/History/`, review past sessions (planned).
+- `Sources/Talkeo/Features/Vocab/`, spaced repetition (planned).
+- `Sources/Talkeo/Core/`, shared infrastructure (provider protocols, settings, storage, auth).
+
+Each feature is a self-contained module. Cross-feature dependencies go through `Core/`. New features ship as new module folders; old features evolve in place.

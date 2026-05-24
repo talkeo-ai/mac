@@ -1,57 +1,96 @@
-# Talkeo
+# Talkeo for Mac
 
-Native popup AI assistant for selected text. Translate, improve, define, pronounce — without leaving the app you're in.
+Native macOS app for Talkeo. Includes the TalkeoSelect popup mode (AI on selected text in any app). More modes planned (practice with Leo, history, vocab review).
 
-Open source (MIT). Free with your own API keys, or opt in to **Talkeo Cloud** for zero-config.
+Part of the [Talkeo ecosystem](https://github.com/talkeo-ai).
 
 ## Status
 
-**v0.1 MVP** — text selection detection + tooltip working on macOS. AI actions in progress.
+**v0.1 MVP.** Text selection detection + floating tooltip working. AI actions in progress.
 
-## Platforms
+## Requirements
 
-| Platform   | Status      | Stack                    | Path            |
-| ---------- | ----------- | ------------------------ | --------------- |
-| macOS 13+  | MVP working | Swift + SwiftUI + AppKit | `apps/macos/`   |
-| Windows 11 | Planned     | WinUI 3 + C#             | `apps/windows/` |
-| Linux      | Future      | TBD                      | —               |
+- macOS 13+
+- Xcode CLI tools (`swift --version` must work)
 
-## Quick start (macOS)
+## Build and run
 
 ```bash
-cd apps/macos
 ./scripts/build-app.sh
 open ./Talkeo.app
 ```
 
-macOS will request **Accessibility permission** on first launch. Approve it and restart the app (CGEventTap caches state per process).
+First launch:
 
-See [`apps/macos/README.md`](./apps/macos/README.md) for details.
+1. Menu bar icon appears (`text.viewfinder`).
+2. macOS prompts for **Accessibility** permission (needed for global CGEventTap and reading selected text via the AX API).
+3. Approve, quit, relaunch (CGEventTap caches state per process).
+
+Test by selecting text in Safari, Notes, TextEdit. Tooltip appears on mouse-up.
 
 ## How it works
 
 1. Select text in any app.
 2. A floating tooltip appears near the selection.
 3. Choose an action: translate, improve, define, pronounce.
-4. Result shown in-place. Optionally written back where you selected (replace-in-place).
-
-Providers (LLM/TTS/STT) are pluggable. Bring your own keys (Groq, OpenAI, ElevenLabs, etc.) — or use Talkeo Cloud for zero-config (paid, optional).
+4. Result shown in place. Optionally written back where you selected (replace-in-place).
 
 ## Providers
 
-- **BYO (default, free):** configure your own API keys in `~/.config/talkeo.json`. Always first-class.
-- **Talkeo Cloud (optional, paid):** login → free credits, paid tier for more. Zero-config, curated.
+Providers (LLM, TTS, STT) are pluggable through protocols. Two ways to use them:
 
-Switch between them anytime in the UI dropdown. No lock-in.
+- **Self-hosted (default, free):** configure your own API keys in `~/.config/talkeo.json`. Always first-class.
+- **Talkeo Cloud (managed, paid):** Talkeo is your provider for everything (database, LLMs, voice, hosting). Zero config.
+
+Switch between them anytime in the UI dropdown.
+
+## Architecture (Swift module)
+
+```
+Sources/Talkeo/
+├── main.swift                          # NSApplication entry
+├── App/
+│   ├── AppDelegate.swift               # permissions + monitor + tooltip orchestration
+│   └── StatusBarController.swift       # menubar icon + menu
+├── Permissions/
+│   └── AccessibilityPermission.swift   # AXIsProcessTrustedWithOptions
+├── Selection/
+│   ├── MouseUpMonitor.swift            # CGEventTap (down/drag/up)
+│   └── SelectionReader.swift           # AX path + clipboard fallback
+└── UI/
+    └── TooltipPanel.swift              # NSPanel + SwiftUI
+```
+
+**Flow:**
+
+```
+mouseDown → drag tracked → mouseUp (drag or double-click) →
+NSEvent.mouseLocation + SelectionReader →
+  ├─ AX: kAXSelectedTextAttribute of focused element
+  └─ fallback: snapshot pasteboard → Cmd+C → read → restore pasteboard
+→ TooltipPanel.show(text, near: anchor)
+```
+
+## Known limitations
+
+- Electron/Chrome apps sometimes don't expose `kAXSelectedTextAttribute`, so the app falls back to clipboard. Fallback restores the previous pasteboard, but there's a ~120ms window where it briefly contains the selected text.
+- Tooltip doesn't auto-hide on outside click yet.
+- API keys are not persisted yet (planned: `~/.config/talkeo.json`).
+
+## Permissions
+
+- **Accessibility** (required) for event tap and AX read/write of selection.
+- **Apple Events** (future, if needed).
+- **Screen Recording** (future, for capture and OCR features).
 
 ## Roadmap
 
-See [ROADMAP.md](./ROADMAP.md). Issues with `good first issue` / `help wanted` labels welcome contributors.
+See [ROADMAP.md](./ROADMAP.md). For ecosystem-wide context (backend, GitHub org, sprint state), see [`docs/ECOSYSTEM.md`](./docs/ECOSYSTEM.md).
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md). Vibecoding welcome. Rigorous review required.
+See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).

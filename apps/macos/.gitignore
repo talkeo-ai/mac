@@ -1,7 +1,0 @@
-.build/
-.swiftpm/
-*.xcodeproj/
-DerivedData/
-Talkeo.app/
-.DS_Store
-config.local.json

@@ -1,11 +1,11 @@
-# Contributing to Talkeo
+# Contributing to Talkeo for Mac
 
 Thanks for your interest. Read this before opening a PR.
 
 ## Mindset
 
 - **Use whatever stack/tool/AI you need.** No artificial limits on complexity or AI use. If a technology solves the problem cleanly, use it.
-- **Vibecoding is welcome.** Use Claude Code, Cursor, GPT, whatever. What matters is the result and your understanding of it — not how you typed it.
+- **Vibecoding is welcome.** Use Claude Code, Cursor, GPT, whatever. What matters is the result and your understanding of it, not how you typed it.
 - **Rigorous review.** Every PR is reviewed for three things:
   1. Does it solve a problem on the [ROADMAP](./ROADMAP.md) or an open issue?
   2. Does the author understand what they did and why?
@@ -17,28 +17,29 @@ If you can't answer all three, the PR will be closed (with feedback, no drama).
 
 ### In scope
 
-- Native text selection assistants per platform (macOS, Windows, Linux).
+- Native macOS app for Talkeo.
+- TalkeoSelect popup mode (AI on selected text in any app) and other planned modes (Practice with Leo, History, Vocab review).
 - AI actions on selected text: translate, improve, define, pronounce, custom.
 - Multiple LLM / TTS / STT providers behind protocol layers.
-- **BYO providers** (Groq, OpenAI, ElevenLabs, Fish Audio, etc.) — community contributions welcome.
+- **BYO provider adapters** as reference examples for self-hosted users.
 - Accessibility-friendly defaults.
 
 ### Out of scope
 
-- Mobile (iOS / Android). Separate projects if needed.
-- Web SaaS surfaces. Talkeo has other surfaces for those.
-- Features requiring server-side state. That belongs in Talkeo Cloud (see below), not in this client.
+- Windows app. See [`talkeo-ai/windows`](https://github.com/talkeo-ai/windows).
+- Backend code. See [`talkeo-ai/talkeo`](https://github.com/talkeo-ai/talkeo).
+- Features requiring server-side state. Those belong in the backend, consumed via the Talkeo Cloud HTTP API.
 
 If you're unsure, open a discussion issue before coding.
 
-## Providers: BYO vs. Talkeo Cloud
+## Providers
 
-Talkeo has two ways to provide AI capabilities:
+Talkeo uses provider protocols (`LLMProvider`, `TTSProvider`, `STTProvider`) so the same UI works with any backend.
 
-- **BYO providers** (LLM / TTS / STT) use the user's own API keys. **Contributions for new BYO providers are welcome** — implement the relevant protocol (`LLMProvider`, `TTSProvider`, `STTProvider`).
-- **Talkeo Cloud** is the optional zero-config paid offering, maintained by the Talkeo team. Talkeo Cloud bindings are **not contributed by the community** — they are implemented and maintained by the maintainer.
+- **Self-hosted mode** uses your own API keys. Contributions for reference BYO adapters are welcome. They serve as examples for other contributors implementing their own adapters.
+- **Talkeo Cloud mode** is the managed option. The Talkeo Cloud client is implemented and maintained by the Talkeo team and is not a target for community contributions.
 
-The provider protocols are designed so BYO implementations and Talkeo Cloud implementations are interchangeable at runtime. Contributors should design protocol-conforming code; Talkeo Cloud integration happens separately and does not need to be considered when implementing BYO providers.
+The protocols are designed so both modes are interchangeable at runtime. When you implement a BYO adapter, the same UI works against Talkeo Cloud without changes.
 
 ## How to contribute
 
@@ -52,10 +53,10 @@ For tiny fixes (typos, obvious bugs), a direct PR without an issue is fine.
 
 ## Code conventions
 
-- **Platform-native:** match the conventions of the platform you're working on (Swift API Design Guidelines on macOS, .NET conventions on Windows, etc.).
+- **Swift API Design Guidelines** for naming and style. When in doubt, run `swift-format`.
 - **Settings persist with `schema_version`** field. Migration paths required when changing.
 - **API keys NEVER in code or commits.** Local config files only (`~/.config/talkeo.json`), gitignored.
-- **Providers behind protocols/interfaces.** No hardcoded providers in UI/action logic. The user (or Talkeo Cloud, separately) decides the provider at runtime.
+- **Providers behind protocols.** No hardcoded providers in UI/action logic. The user (or Talkeo Cloud, separately) decides the provider at runtime.
 - **English everywhere.** Code, comments, commits, PRs, issues, docs.
 
 ## Maintainer

@@ -1,33 +1,31 @@
-# Personal AI brief (each contributor has their own — not committed)
+# Personal AI brief (each contributor has their own, not committed)
 CLAUDE.md
 **/CLAUDE.md
 
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/
+*.xcworkspace/
+
+# Build artifacts
+Talkeo.app/
+build/
+dist/
+out/
+
 # macOS
 .DS_Store
-apps/macos/.build/
-apps/macos/.swiftpm/
-apps/macos/Talkeo.app/
-
-# Windows
-apps/windows/bin/
-apps/windows/obj/
-apps/windows/.vs/
 
 # Editor / IDE
 .vscode/
 .idea/
-*.xcodeproj/
-*.xcworkspace/
 
 # User config (NEVER commit secrets)
 .env
 .env.local
 *.key
 *.pem
+config.local.json
 ~/.config/talkeo.json
-
-# Build artifacts (general)
-build/
-dist/
-out/
-node_modules/

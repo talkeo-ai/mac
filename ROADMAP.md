@@ -1,61 +1,80 @@
-# Talkeo — Roadmap
+# Talkeo for Mac, Roadmap
 
-> Source of truth for what we're building and why. Items are intent, not promises.
+> Source of truth for what the Mac app is building and why. Items represent intent, not promises. For ecosystem-wide roadmap (backend, GitHub org, multi-agent flow), see `docs/ECOSYSTEM.md`. For other platforms, see [`talkeo-ai/windows`](https://github.com/talkeo-ai/windows).
 
 ## The problem we solve
 
 Reading, writing, and listening in a non-native language create constant friction. You stop, switch tabs, paste into a translator, copy back, lose flow. AI tools that work on **selected text, in any app** eliminate this friction.
 
-Talkeo is the native popup that does this — translate, improve, define, pronounce — without leaving the app you're in. Free with your own provider API keys. Optionally paid (Talkeo Cloud, future) for zero-config and curated providers.
+**Talkeo for Mac** puts AI tutoring across the surfaces where language friction actually happens. Text selection (TalkeoSelect mode), voice practice with Leo, vocab review, and more. Free with your own provider API keys. Optional Talkeo Cloud (paid) for zero-config.
 
-## v0.1 — MVP (current sprint, ship target 17-18 May 2026)
+## App identity
 
-**Goal:** Core text actions working with BYO providers, on macOS, with a Settings panel and a Talkeo Cloud waitlist signup.
+Talkeo is the app. Features are modes inside the app:
 
-- [x] Text selection detection on macOS (Accessibility API + clipboard fallback)
+- **TalkeoSelect.** Popup-on-text-selection. Translate, improve, define, pronounce on any selected text in any app. (Current MVP focus.)
+- **Practice mode.** Voice conversation with Leo, the AI tutor agent. (Planned, post-Cloud integration.)
+- **History.** Review past practice sessions, captured selections, learning progress. (Planned.)
+- **Vocab review.** Spaced repetition on words seen in selections and practice. (Planned.)
+- **Settings and account.** Configure providers, BYO keys, Talkeo Cloud login. (Active.)
+
+One app, one download. Features ship incrementally as the Cloud backend exposes the needed capabilities.
+
+## v0.1, TalkeoSelect MVP (active sprint)
+
+**Goal:** Core text selection actions working with BYO providers on macOS, with a Settings panel.
+
+- [x] Text selection detection on macOS (Accessibility API plus clipboard fallback)
 - [x] Floating tooltip UI
-- [ ] Provider protocol layer (`LLMProvider`, `TTSProvider`) — provider-neutral by design
-- [ ] At least one BYO LLM provider implementation (specific provider TBD; architecture supports any)
-- [ ] At least one BYO TTS provider implementation
+- [ ] Provider protocol layer (`LLMProvider`, `TTSProvider`), provider-neutral by design
+- [ ] At least one BYO LLM provider reference implementation
+- [ ] At least one BYO TTS provider reference implementation
 - [ ] Core actions: Translate, Improve, Define, Pronounce
 - [ ] Settings panel (configure providers, manage keys, voice IDs, models)
 - [ ] Settings persisted to `~/.config/talkeo.json` (`schema_version: 1`)
-- [ ] Talkeo Cloud waitlist signup (in-app email capture; backend = simple form service)
-- [ ] OSS foundation (LICENSE, README, CONTRIBUTING, this ROADMAP, CHANGELOG, issue/PR templates)
-- [ ] Public GitHub repo
+- [ ] OSS foundation polish (LICENSE, README, CONTRIBUTING, ROADMAP, CHANGELOG, issue/PR templates)
+- [ ] Talkeo Cloud waitlist signup (in-app email capture)
 
-## v0.2 — Talkeo Cloud
+## v0.2, Talkeo Cloud integration
 
-**Goal:** Optional paid zero-config experience. Users sign in with a Talkeo account, get curated LLM/TTS/voices without configuring keys. BYO remains fully functional and first-class.
+**Goal:** Optional managed experience. Users sign in with a Talkeo account, get curated providers without configuring keys. BYO remains fully functional and first-class.
 
-- [ ] Talkeo Cloud backend (separate repo): router + voice catalog + auth + billing + streaming pass-through
-- [ ] `TalkeoCloudProvider` implementations (LLM, TTS, STT) inside the client
-- [ ] Login flow + free credits tier
-- [ ] Paid subscription tier
-- [ ] UI provider switcher (BYO ↔ Talkeo Cloud, per capability)
+Triggers when the Cloud backend migration completes (see `docs/ECOSYSTEM.md` for sprint phases).
 
-## v0.3 — Direction TBD: pick one when v0.2 ships
+- [ ] `TalkeoCloudProvider` implementations (LLM, TTS, STT) in the client. Call the Cloud HTTP API.
+- [ ] Login flow (auth against Cloud)
+- [ ] UI provider switcher (BYO vs Talkeo Cloud, per capability)
+- [ ] `selections` persistence: captured text from TalkeoSelect saved to Cloud for later practice context
+- [ ] Free credits tier integration
+- [ ] Paid subscription tier integration
 
-Two candidate directions, decide based on v0.2 traction + user feedback:
+## v0.3, Practice mode (Leo integration)
 
-- **Global subtitles overlay** (likely — most aligned with the daily-use vision). System audio capture + real-time transcription + click-to-translate. Watch any content, activate subtitles only when needed, translate specific words on demand, or full L1 fallback.
-- **Personalized teacher / forced practice.** Speaking + reading practice sessions driven by accumulated usage data (which words you looked up, which phrasings you struggled with). Forces practice on actual weak spots, not random vocabulary.
+**Goal:** Voice practice sessions with Leo, the AI tutor agent, accessible from the Mac app.
 
-## Beyond
+- [ ] Main window with Practice mode UI (separate from TalkeoSelect popup)
+- [ ] Voice session with Leo via WebRTC/streaming
+- [ ] Practice sessions tailored to the user's captured selections (using context from v0.2 persistence)
+- [ ] Session feedback (corrections, improvement areas) surfaced post-session
 
-- Custom user-defined actions
-- Linux port (community-driven, see below)
-- Whatever the data flywheel + user feedback surfaces
+## v0.4 and beyond, direction TBD
 
-## Cross-platform strategy
+Decide based on v0.3 traction and user feedback. Candidate directions:
 
-- **macOS = source of truth** for UX and architecture decisions.
-- **Windows is built in parallel with macOS, not after.** Contributors own the Windows implementation under `apps/windows/` (WinUI 3 + C# planned). Maintainer (@realjoaquinalvarez) tests and reviews but does not write the Windows code.
-- **Linux:** no roadmap commitment from the maintainer. Community proposals welcome — open an issue describing your approach (GTK4 / Qt / Electron / whatever) before starting work.
+- **History plus Vocab review modes.** Review past practice plus spaced repetition for words seen.
+- **Global subtitles overlay.** System audio capture plus real-time transcription plus click-to-translate. Watch any content, activate subtitles only when needed, translate specific words on demand.
+- **Personalized teacher, forced practice.** Sessions driven by accumulated usage data (which words looked up, which phrasings struggled with).
+
+## Open source
+
+- License: MIT.
+- Code public.
+- Provider implementations in this repo are reference adapters for BYO use. Production routing decisions for Talkeo Cloud (managed) live in a private repo. See `docs/ECOSYSTEM.md` provider strategy.
+- Contributions welcome via issues plus PRs. PRs reference an issue. Maintainer veto on scope, architecture, merges.
 
 ## Conventions
 
 - Each version has a **named Goal**, not just a feature list.
-- Items map to GitHub issues with labels (`good first issue`, `help wanted`, `area: macos / windows / providers / ui / cloud`).
-- This roadmap can change. We commit to direction, not specific dates.
+- Items map to GitHub issues with labels (`good first issue`, `help wanted`, `area: providers / ui / selection / practice / cloud`).
+- Roadmap can change. Direction commits, not specific dates.
 - PRs reference roadmap items (`Fixes #N`).
