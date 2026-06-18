@@ -18,10 +18,15 @@ final class StatusBarController {
     }
 
     private func configureButton() {
-        if let button = statusItem.button {
-            let image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: "Talkeo")
-            image?.isTemplate = true
+        guard let button = statusItem.button else { return }
+        if let url = Bundle.main.url(forResource: "icon", withExtension: "png"),
+           let image = NSImage(contentsOf: url) {
+            image.size = NSSize(width: 18, height: 18)
             button.image = image
+        } else {
+            let fallback = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: "Talkeo")
+            fallback?.isTemplate = true
+            button.image = fallback
         }
     }
 
