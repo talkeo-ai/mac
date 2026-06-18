@@ -1,11 +1,16 @@
 name: Talkeo
 
 # Source of truth for the Xcode project. The generated `Talkeo.xcodeproj` is
-# gitignored — regenerate it with `xcodegen` (or `scripts/gen-xcodeproj.sh`)
-# after pulling. Building from Xcode produces a real `.app` bundle (icon,
-# Info.plist, Accessibility entry) — unlike opening Package.swift directly,
-# which runs a bare executable with no bundle. `build-app.sh` (SPM) stays the
-# CLI/release path; both compile the same sources under Sources/Talkeo.
+# gitignored — regenerate it with `scripts/gen-xcodeproj.sh` after pulling.
+# Building from Xcode produces a real `.app` bundle (icon, Info.plist,
+# Accessibility entry) — unlike opening Package.swift directly, which runs a
+# bare executable with no bundle. `build-app.sh` (SPM) stays the CLI/release
+# path; both compile the same sources under Sources/Talkeo.
+#
+# Signing: each developer sets their own team in `Talkeo.local.xcconfig`
+# (gitignored — copy from Talkeo.local.xcconfig.example). A stable signing
+# identity is what lets macOS remember the Accessibility permission across
+# rebuilds, instead of re-prompting every run.
 
 options:
   bundleIdPrefix: dev.joaquin
@@ -21,6 +26,9 @@ targets:
   Talkeo:
     type: application
     platform: macOS
+    configFiles:
+      Debug: Talkeo.local.xcconfig
+      Release: Talkeo.local.xcconfig
     sources:
       - path: Sources/Talkeo
       - path: Resources/icon.png
@@ -33,8 +41,9 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.joaquin.talkeo
         INFOPLIST_FILE: Resources/Info.plist
         GENERATE_INFOPLIST_FILE: NO
-        # Ad-hoc signing to match build-app.sh — runs locally, no team needed.
-        CODE_SIGN_STYLE: Manual
-        CODE_SIGN_IDENTITY: "-"
-        DEVELOPMENT_TEAM: ""
         ENABLE_HARDENED_RUNTIME: NO
+        # Automatic signing with the developer's team (from Talkeo.local.xcconfig).
+        # Xcode manages the Apple Development cert + profile. A stable signing
+        # identity is what lets macOS keep the Accessibility grant across rebuilds,
+        # instead of re-prompting every run (the old ad-hoc behaviour).
+        CODE_SIGN_STYLE: Automatic

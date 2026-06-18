@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// Floating non-activating chip that expands into a vertical menu on hover.
@@ -9,11 +10,16 @@ final class TooltipPanel {
     private let hosting: NSHostingView<TooltipView>
     private let model: TooltipModel
     private var dismissMonitor: Any?
+    private var autoDismissTimer: Timer?
+    private var hideToken = 0
+    private var cancellables = Set<AnyCancellable>()
     private var leftAnchor: CGFloat = 0
     private var topAnchor: CGFloat = 0
 
-    private static let collapsedSize = NSSize(width: 44, height: 44)
+    private static let collapsedSize = NSSize(width: 34, height: 34)
     private static let maxSize = NSSize(width: 240, height: 220)
+    /// How long the collapsed chip stays up untouched before fading out.
+    private static let autoDismissDelay: TimeInterval = 4
 
     init() {
         let model = TooltipModel()
@@ -48,6 +54,15 @@ final class TooltipPanel {
         onResizeRef = { [weak self] size in
             self?.resizePanel(to: size)
         }
+
+        // Once the user expands the chip into the menu they're actively using it,
+        // so stop the idle auto-dismiss. Click/scroll outside still closes it.
+        model.$isExpanded
+            .removeDuplicates()
+            .sink { [weak self] expanded in
+                if expanded { self?.cancelAutoDismiss() }
+            }
+            .store(in: &cancellables)
     }
 
     func show(text: String, near point: NSPoint) {
@@ -56,14 +71,41 @@ final class TooltipPanel {
         let origin = clampedOrigin(near: point, size: Self.collapsedSize)
         leftAnchor = origin.x
         topAnchor = origin.y + Self.collapsedSize.height // bottom-left coords → top edge
+        hideToken += 1 // invalidate any in-flight fade-out
+        panel.alphaValue = 1
         panel.setFrame(NSRect(origin: origin, size: Self.collapsedSize), display: true)
         panel.orderFrontRegardless()
         installDismissMonitor()
+        startAutoDismiss()
     }
 
     func hide() {
-        panel.orderOut(nil)
         removeDismissMonitor()
+        cancelAutoDismiss()
+        guard panel.isVisible, panel.alphaValue > 0 else { return }
+
+        hideToken += 1
+        let token = hideToken
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.18
+            panel.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self, self.hideToken == token else { return } // re-shown meanwhile
+            self.panel.orderOut(nil)
+            self.panel.alphaValue = 1
+        })
+    }
+
+    private func startAutoDismiss() {
+        cancelAutoDismiss()
+        autoDismissTimer = Timer.scheduledTimer(withTimeInterval: Self.autoDismissDelay, repeats: false) { [weak self] _ in
+            self?.hide()
+        }
+    }
+
+    private func cancelAutoDismiss() {
+        autoDismissTimer?.invalidate()
+        autoDismissTimer = nil
     }
 
     /// Called on every SwiftUI layout pass (incl. each animation frame).
@@ -84,7 +126,7 @@ final class TooltipPanel {
     private func installDismissMonitor() {
         removeDismissMonitor()
         dismissMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
         ) { [weak self] _ in
             self?.hide()
         }
@@ -163,11 +205,12 @@ struct TooltipView: View {
 
     private var collapsedChip: some View {
         BrandIcon()
-            .frame(width: 32, height: 32)
-            .padding(6)
-            .background(pillBackground(corner: 12))
-            .onHover { hovering in
-                guard hovering, !model.isExpanded else { return }
+            .frame(width: 24, height: 24)
+            .padding(5)
+            .background(pillBackground(corner: 10))
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard !model.isExpanded else { return }
                 withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
                     model.isExpanded = true
                 }
@@ -295,3 +338,25 @@ private struct BrandIcon: View {
         .overlay(Circle().stroke(Color.primary.opacity(0.10), lineWidth: 0.5))
     }
 }
+
+// MARK: - Xcode Previews
+// Live, build-free iteration on the tooltip's look (open the canvas with ⌥⌘↩).
+// The brand icon falls back to an SF Symbol here because the preview host has no
+// icon.png in its bundle — these previews are for layout/sizing, not the asset.
+
+private struct TooltipPreview: View {
+    let expanded: Bool
+    @StateObject private var model = TooltipModel()
+
+    var body: some View {
+        TooltipView(model: model, onResize: { _ in })
+            .padding(40)
+            .onAppear {
+                model.text = "Selected text"
+                model.isExpanded = expanded
+            }
+    }
+}
+
+#Preview("Collapsed chip") { TooltipPreview(expanded: false) }
+#Preview("Expanded menu") { TooltipPreview(expanded: true) }

@@ -1,0 +1,8 @@
+// Copy this file to `Talkeo.local.xcconfig` and set your own team ID.
+// Find it with:  security find-identity -v -p codesigning
+// (the 10-character code in parentheses, e.g. "Apple Development: you@mail (ABCDE12345)")
+//
+// A stable signing identity lets macOS remember the Accessibility permission
+// across rebuilds. With ad-hoc signing the binary hash changes every build, so
+// macOS treats each build as a new app and re-prompts for permission.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
