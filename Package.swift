@@ -8,6 +8,11 @@ let package = Package(
         .executableTarget(
             name: "Talkeo",
             path: "Sources/Talkeo"
+        ),
+        .testTarget(
+            name: "TalkeoTests",
+            dependencies: ["Talkeo"],
+            path: "Tests/TalkeoTests"
         )
     ]
 )
