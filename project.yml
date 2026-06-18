@@ -1,0 +1,40 @@
+name: Talkeo
+
+# Source of truth for the Xcode project. The generated `Talkeo.xcodeproj` is
+# gitignored — regenerate it with `xcodegen` (or `scripts/gen-xcodeproj.sh`)
+# after pulling. Building from Xcode produces a real `.app` bundle (icon,
+# Info.plist, Accessibility entry) — unlike opening Package.swift directly,
+# which runs a bare executable with no bundle. `build-app.sh` (SPM) stays the
+# CLI/release path; both compile the same sources under Sources/Talkeo.
+
+options:
+  bundleIdPrefix: dev.joaquin
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+
+targets:
+  Talkeo:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/Talkeo
+      - path: Resources/icon.png
+        buildPhase: resources
+      - path: Resources/AppIcon.icns
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_NAME: Talkeo
+        PRODUCT_BUNDLE_IDENTIFIER: dev.joaquin.talkeo
+        INFOPLIST_FILE: Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        # Ad-hoc signing to match build-app.sh — runs locally, no team needed.
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        ENABLE_HARDENED_RUNTIME: NO
