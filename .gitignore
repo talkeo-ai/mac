@@ -9,6 +9,9 @@ DerivedData/
 *.xcodeproj/
 *.xcworkspace/
 
+# Per-developer signing config (each contributor sets their own team)
+Talkeo.local.xcconfig
+
 # Build artifacts
 Talkeo.app/
 build/
