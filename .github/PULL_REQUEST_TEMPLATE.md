@@ -1,19 +1,13 @@
-## Linked issue
+## What & why
 
-Fixes #___
+<!-- One or two lines. -->
 
-## What changed
+Closes #
 
-- 
+## Proof of work (required — AI output alone isn't enough)
 
-## How to test
+A PR that was never built and run gets closed. Show it working:
 
-- 
-
-## Checklist
-
-- [ ] Linked to a roadmap item or open issue (or it's a tiny obvious fix)
-- [ ] I understand what this does and why — I can explain it
-- [ ] Code follows platform conventions and existing architecture
-- [ ] No API keys / secrets / personal paths in committed files
-- [ ] Tests added or updated if applicable
+- [ ] 🎞️ **GIF / screen recording** of the change working (mandatory for UI/UX changes — drag the file in here, don't commit it)
+- [ ] 🔨 **Builds clean**
+- [ ] ✅ **Ran it and tested** — steps I actually did:

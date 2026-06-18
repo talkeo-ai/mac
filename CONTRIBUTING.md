@@ -6,12 +6,21 @@ Thanks for your interest. Read this before opening a PR.
 
 - **Use whatever stack/tool/AI you need.** No artificial limits on complexity or AI use. If a technology solves the problem cleanly, use it.
 - **Vibecoding is welcome.** Use Claude Code, Cursor, GPT, whatever. What matters is the result and your understanding of it, not how you typed it.
-- **Rigorous review.** Every PR is reviewed for three things:
+- **Rigorous review.** Every PR is reviewed for four things:
   1. Does it solve a problem on the [ROADMAP](./ROADMAP.md) or an open issue?
   2. Does the author understand what they did and why?
   3. Is the code clean and consistent with the surrounding architecture?
+  4. Was it actually built, run, and verified — not just generated?
 
-If you can't answer all three, the PR will be closed (with feedback, no drama).
+If you can't answer all four, the PR will be closed (with feedback, no drama).
+
+### Proof of work (required for review)
+
+AI-generated code is welcome, but **AI output alone is never enough** — you must build it, run it, and confirm it works *before* requesting review. A PR that compiles in theory but was never run will be closed. Every PR must include:
+
+- **A GIF or short screen recording of the change working.** Mandatory for any UI/UX change — it's the fastest proof the behavior is real. Drag the file into the PR description (GitHub hosts it; don't commit it to the repo).
+- **Confirmation it builds** — `swift build` *and* the Xcode build, both clean.
+- **What you actually tested** — the real manual steps you ran to verify it, not aspirational checkboxes.
 
 ## Scope
 
