@@ -16,6 +16,10 @@ final class TooltipPanel {
     private var leftAnchor: CGFloat = 0
     private var topAnchor: CGFloat = 0
 
+    /// Invoked when the user picks Translate from the menu, carrying the
+    /// currently-selected text. The owner opens the translate panel.
+    var onTranslate: ((String) -> Void)?
+
     private static let collapsedSize = NSSize(width: 34, height: 34)
     private static let maxSize = NSSize(width: 240, height: 220)
     /// How long the collapsed chip stays up untouched before fading out.
@@ -41,9 +45,12 @@ final class TooltipPanel {
         panel.isOpaque = false
 
         var onResizeRef: ((CGSize) -> Void)?
-        let view = TooltipView(model: model) { size in
-            onResizeRef?(size)
-        }
+        var onTranslateRef: (() -> Void)?
+        let view = TooltipView(
+            model: model,
+            onResize: { onResizeRef?($0) },
+            onTranslate: { onTranslateRef?() }
+        )
         let hosting = NSHostingView(rootView: view)
         hosting.frame = NSRect(origin: .zero, size: Self.maxSize)
         panel.contentView = hosting
@@ -53,6 +60,15 @@ final class TooltipPanel {
 
         onResizeRef = { [weak self] size in
             self?.resizePanel(to: size)
+        }
+
+        // Hand the selected text to the owner and dismiss the chip, so the
+        // translate panel takes over (it's activating; the chip isn't).
+        onTranslateRef = { [weak self] in
+            guard let self else { return }
+            let text = self.model.text
+            self.hide()
+            self.onTranslate?(text)
         }
 
         // Once the user expands the chip into the menu they're actively using it,
@@ -180,6 +196,7 @@ private enum Brand {
 struct TooltipView: View {
     @ObservedObject var model: TooltipModel
     let onResize: (CGSize) -> Void
+    var onTranslate: () -> Void = {}
 
     var body: some View {
         container
@@ -238,11 +255,11 @@ struct TooltipView: View {
             }
             Divider().opacity(0.4)
             MenuRow(
-                kind: .system("arrow.left.arrow.right"),
-                title: "Switch language",
+                kind: .system("character.bubble"),
+                title: "Translate",
                 subtitle: "Auto ES ⇄ EN"
             ) {
-                // TODO: Groq translate w/ language detection
+                onTranslate()
             }
             Divider().opacity(0.4)
             MenuRow(

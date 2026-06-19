@@ -4,11 +4,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBar: StatusBarController!
     private var mouseMonitor: MouseUpMonitor!
     private var tooltip: TooltipPanel!
+    private var translate: TranslatePanel!
     private let reader = SelectionReader()
     private let permission = AccessibilityPermission()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         tooltip = TooltipPanel()
+        translate = TranslatePanel()
+        tooltip.onTranslate = { [weak self] text in
+            self?.translate.show(text: text)
+        }
         statusBar = StatusBarController(
             isTrusted: { [weak self] in self?.permission.isTrusted ?? false },
             requestPermission: { [weak self] in self?.permission.requestIfNeeded() },
@@ -38,6 +43,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleSelection() {
+        // Never trigger the chip on selections inside Talkeo's own windows
+        // (e.g. painting text in the translate panel) — only on other apps.
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier {
+            return
+        }
         let anchor = NSEvent.mouseLocation
         reader.readSelectedText { [weak self] text in
             guard let self, let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
