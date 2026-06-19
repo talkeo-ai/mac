@@ -6,11 +6,14 @@ import AppKit
 protocol PasteboardProtocol: AnyObject {
     var changeCount: Int { get }
     func string(forType type: NSPasteboard.PasteboardType) -> String?
+    func availableTypes() -> [NSPasteboard.PasteboardType]
     func snapshotItems() -> [[NSPasteboard.PasteboardType: Data]]
     func restore(items: [[NSPasteboard.PasteboardType: Data]])
 }
 
 extension NSPasteboard: PasteboardProtocol {
+    func availableTypes() -> [NSPasteboard.PasteboardType] { types ?? [] }
+
     /// Captures every item and every type currently on the pasteboard.
     /// Best-effort: promise providers (lazy data) are not guaranteed to survive.
     func snapshotItems() -> [[NSPasteboard.PasteboardType: Data]] {

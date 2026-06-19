@@ -7,6 +7,7 @@ import XCTest
 private final class FakePasteboard: PasteboardProtocol {
     private(set) var changeCount = 0
     private var stored: String?
+    private var types: [NSPasteboard.PasteboardType] = []
     private(set) var restoreCount = 0
 
     init(initial: String?) {
@@ -14,6 +15,8 @@ private final class FakePasteboard: PasteboardProtocol {
     }
 
     func string(forType type: NSPasteboard.PasteboardType) -> String? { stored }
+
+    func availableTypes() -> [NSPasteboard.PasteboardType] { types }
 
     func snapshotItems() -> [[NSPasteboard.PasteboardType: Data]] {
         guard let stored, let data = stored.data(using: .utf8) else { return [] }
@@ -31,9 +34,10 @@ private final class FakePasteboard: PasteboardProtocol {
     }
 
     /// Simulates a copy landing on the pasteboard (ours or the user's).
-    func simulateWrite(_ value: String) {
+    func simulateWrite(_ value: String, types: [NSPasteboard.PasteboardType] = [.string]) {
         changeCount += 1
         stored = value
+        self.types = types
     }
 }
 
@@ -123,5 +127,39 @@ final class PasteboardCopyServiceTests: XCTestCase {
 
         XCTAssertEqual(pb.restoreCount, 0, "two writes since snapshot → restore skipped")
         XCTAssertEqual(pb.string(forType: .string), "the selection")
+    }
+
+    /// 5. Finder file drag: a file-url payload is rejected (nil), but the clipboard
+    ///    is still restored (the file copy dirtied it).
+    func testFilePayloadIsRejectedButClipboardRestored() {
+        let pb = FakePasteboard(initial: "user-clipboard")
+        let service = makeService(pasteboard: pb) {
+            pb.simulateWrite("/Users/me/file.txt", types: [.fileURL, .string])
+        }
+
+        let exp = expectation(description: "completion")
+        service.transientCopy { text in
+            XCTAssertNil(text, "file payload must not be treated as a text selection")
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 1)
+
+        XCTAssertEqual(pb.restoreCount, 1)
+        XCTAssertEqual(pb.string(forType: .string), "user-clipboard")
+    }
+
+    /// 6. Regression: a plain string payload is still returned as text.
+    func testStringPayloadStillReturnsText() {
+        let pb = FakePasteboard(initial: "user-clipboard")
+        let service = makeService(pasteboard: pb) {
+            pb.simulateWrite("the selection", types: [.string])
+        }
+
+        let exp = expectation(description: "completion")
+        service.transientCopy { text in
+            XCTAssertEqual(text, "the selection")
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 1)
     }
 }

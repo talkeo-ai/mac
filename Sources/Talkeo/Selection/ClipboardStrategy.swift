@@ -15,8 +15,16 @@ final class ClipboardStrategy: SelectionStrategy {
         )
     }
 
-    func readSelection(completion: @escaping (String?) -> Void) {
-        service.transientCopy(completion: completion)
+    func readSelection(completion: @escaping (SelectionResult) -> Void) {
+        // The clipboard can't distinguish "no selection" from "nothing copied", so
+        // it never returns `.empty` — a miss is `.unsupported`.
+        service.transientCopy { text in
+            if let text, !text.isEmpty {
+                completion(.text(text))
+            } else {
+                completion(.unsupported)
+            }
+        }
     }
 
     /// Posts ⌘C at the HID level.
