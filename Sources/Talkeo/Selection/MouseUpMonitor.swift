@@ -52,6 +52,25 @@ final class MouseUpMonitor {
         NSLog("[Talkeo] mouse monitor started")
     }
 
+    /// Whether a mouse-up looks like it produced/changed a text selection.
+    ///   - drag selection: moved > 3px while dragging.
+    ///   - multi-click: double/triple click selects word/line/paragraph.
+    ///   - shift+click: extends an existing selection to the click point — a real
+    ///     OS selection that has no drag and a single click, so it was previously
+    ///     missed (mac#13). The downstream reader validates that a selection
+    ///     actually exists, so a stray shift+click on non-text yields no tooltip.
+    static func isSelectionCandidate(
+        didDrag: Bool,
+        dragDistanceSquared: Double,
+        clickState: Int64,
+        shiftHeld: Bool
+    ) -> Bool {
+        let isDragSelection = didDrag && dragDistanceSquared > 9 // >3px movement
+        let isMultiClick = clickState >= 2
+        let isShiftClick = shiftHeld
+        return isDragSelection || isMultiClick || isShiftClick
+    }
+
     private func handle(type: CGEventType, event: CGEvent) {
         switch type {
         case .leftMouseDown:
@@ -62,16 +81,20 @@ final class MouseUpMonitor {
         case .leftMouseUp:
             let location = event.location
             let clickState = event.getIntegerValueField(.mouseEventClickState)
-            let isMultiClick = clickState >= 2
-            let isDragSelection: Bool
+            let distanceSquared: Double
             if let down = downLocation {
                 let dx = location.x - down.x
                 let dy = location.y - down.y
-                isDragSelection = didDrag && (dx * dx + dy * dy) > 9 // >3px movement
+                distanceSquared = dx * dx + dy * dy
             } else {
-                isDragSelection = false
+                distanceSquared = 0
             }
-            let candidate = isDragSelection || isMultiClick
+            let candidate = Self.isSelectionCandidate(
+                didDrag: didDrag,
+                dragDistanceSquared: distanceSquared,
+                clickState: clickState,
+                shiftHeld: event.flags.contains(.maskShift)
+            )
             downLocation = nil
             didDrag = false
             if candidate {
