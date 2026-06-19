@@ -44,7 +44,7 @@ final class TooltipPanel {
         let view = TooltipView(model: model) { size in
             onResizeRef?(size)
         }
-        let hosting = ArrowCursorHostingView(rootView: view)
+        let hosting = NSHostingView(rootView: view)
         hosting.frame = NSRect(origin: .zero, size: Self.maxSize)
         panel.contentView = hosting
 
@@ -155,40 +155,6 @@ final class TooltipPanel {
     }
 }
 
-// MARK: - Cursor
-
-/// Hosting view that forces the standard arrow cursor while the pointer is over
-/// the tooltip. The panel is a non-activating borderless panel, so it never
-/// becomes the key window — which means AppKit's cursor-rect machinery
-/// (`addCursorRect`/`resetCursorRects`) never applies, and the I-beam set by the
-/// text view underneath (e.g. a terminal) lingers. A self-managed tracking area
-/// with `.activeAlways` is the standard way to reclaim the cursor for a
-/// non-key window.
-private final class ArrowCursorHostingView<Content: View>: NSHostingView<Content> {
-    private var cursorTrackingArea: NSTrackingArea?
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let existing = cursorTrackingArea { removeTrackingArea(existing) }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .cursorUpdate, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        cursorTrackingArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        NSCursor.arrow.set()
-    }
-
-    override func cursorUpdate(with event: NSEvent) {
-        NSCursor.arrow.set()
-    }
-}
-
 // MARK: - SwiftUI content
 
 final class TooltipModel: ObservableObject {
@@ -218,6 +184,16 @@ struct TooltipView: View {
     var body: some View {
         container
             .fixedSize()
+            // The panel is a non-activating borderless panel, so it never becomes
+            // the key window and AppKit's cursor-rect machinery never applies — the
+            // I-beam set by the text view underneath (e.g. a terminal) would linger.
+            // Reclaim the cursor from SwiftUI's own hover tracking (the same one the
+            // row highlights use), reasserting the arrow on every move so the system
+            // can't revert it. Done here rather than via an NSHostingView subclass so
+            // it doesn't fight SwiftUI's tracking areas (which broke hover on reuse).
+            .onContinuousHover { phase in
+                if case .active = phase { NSCursor.arrow.set() }
+            }
             .background(
                 GeometryReader { geo in
                     Color.clear.preference(key: SizePreferenceKey.self, value: geo.size)
