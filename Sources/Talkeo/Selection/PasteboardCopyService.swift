@@ -65,6 +65,7 @@ final class PasteboardCopyService {
         if current > priorCount {
             // A write landed. We presume it is ours (the copy we triggered).
             let ourCount = current
+            let types = pasteboard.availableTypes()
             let text = pasteboard.string(forType: .string)
 
             // Two-write detection: if the count jumped by more than one since the
@@ -72,9 +73,19 @@ final class PasteboardCopyService {
             // over fresh data.
             let singleWrite = (ourCount == priorCount + 1)
 
-            // Conditional restore: only if nobody wrote after our copy.
+            // Conditional restore: only if nobody wrote after our copy. Runs even
+            // for a file payload — a Finder file copy dirtied the user's clipboard
+            // and must be undone — we only suppress the tooltip, not the restore.
             if singleWrite, pasteboard.changeCount == ourCount {
                 pasteboard.restore(items: snapshot)
+            }
+
+            // A file drag (Finder) copies a file reference, not a text selection.
+            // Reject by type, not by string-parsing: a path string is a legitimate
+            // text selection in a terminal.
+            if Self.isFilePayload(types) {
+                completion(nil)
+                return
             }
 
             completion(nonEmpty(text))
@@ -96,5 +107,14 @@ final class PasteboardCopyService {
     private func nonEmpty(_ text: String?) -> String? {
         guard let text, !text.isEmpty else { return nil }
         return text
+    }
+
+    private static func isFilePayload(_ types: [NSPasteboard.PasteboardType]) -> Bool {
+        let fileTypes: Set<NSPasteboard.PasteboardType> = [
+            .fileURL,
+            NSPasteboard.PasteboardType("public.file-url"),
+            NSPasteboard.PasteboardType("NSFilenamesPboardType"),
+        ]
+        return types.contains { fileTypes.contains($0) }
     }
 }
