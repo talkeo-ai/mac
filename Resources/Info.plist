@@ -30,5 +30,13 @@
     <string>Personal use.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Talkeo needs to send events to read and replace the selected text.</string>
+    <!-- Allow plaintext HTTP to local backends (e.g. http://localhost:8000) for
+         self-hosted / dev use. This is the narrow local-networking exception, not
+         arbitrary loads — Talkeo Cloud is reached over HTTPS in production. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
 </dict>
 </plist>

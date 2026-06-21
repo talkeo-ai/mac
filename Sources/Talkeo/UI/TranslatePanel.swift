@@ -138,23 +138,103 @@ final class TranslateModel: ObservableObject {
     @Published var voiceModel: String = TranslateModel.voiceModels[0]
     static let voiceModels = ["Talkeo", "System voice"]
 
-    /// Drives the one-shot reveal of the translation (no typewriter effect).
+    /// One-shot blur reveal of the translation: flips true on the first delta.
     @Published var revealed: Bool = false
-    /// Bumped on every (re)translation so the reveal `.task(id:)` re-fires.
+    /// Bumped on every (re)translation so the view can react if needed.
     @Published var streamID: Int = 0
 
+    /// Streaming status of the current translation, and of each painted span's
+    /// explanation (keyed by span id) — drives loading / error UI.
+    @Published var translationPhase: LoadPhase = .idle
+    @Published var explanations: [String: String] = [:]
+    @Published var explanationPhases: [String: LoadPhase] = [:]
+
+    private let client: TransformClient
+    private var translateTask: Task<Void, Never>?
+    private var explainTasks: [String: Task<Void, Never>] = [:]
+    /// Last source we actually translated, so tapping "Done" without edits is a no-op.
+    private var lastTranslatedSource = ""
+
+    init(client: TransformClient = TalkeoTransformClient()) {
+        self.client = client
+    }
+
+    enum LoadPhase: Equatable {
+        case idle
+        case streaming
+        case done
+        case failed(String)
+    }
+
+    // MARK: Translation
+
     func startTranslation(source: String) {
-        sourceText = source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? TranslateMock.sampleSource
-            : source
-        targetText = TranslateMock.sampleTarget // mock: canned, revealed one-shot
+        sourceText = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        runTranslation()
+    }
+
+    /// Re-translate the current (edited) source. No-op if it hasn't changed since
+    /// the last translation — tapping "Done" without edits shouldn't refetch.
+    func retranslate() {
+        sourceEditing = false
+        let trimmed = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != lastTranslatedSource else { return }
+        runTranslation()
+    }
+
+    /// Retry after a failure (re-runs the current source).
+    func retryTranslation() {
+        runTranslation()
+    }
+
+    private func runTranslation() {
+        translateTask?.cancel()
+        cancelExplanations()
+        targetText = ""
         painted = []
+        explanations = [:]
+        explanationPhases = [:]
+        activeSpanID = nil
         revealed = false
         sourceEditing = false
         streamID += 1
+
+        let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        lastTranslatedSource = text
+        guard !text.isEmpty else {
+            translationPhase = .idle
+            return
+        }
+        translationPhase = .streaming
+
+        // Auto-detect (omit source_lang) until the user pins the direction via swap.
+        let source = sourceDetected ? nil : sourceLang
+        let stream = client.translate(text: text, sourceLang: source, targetLang: targetLang)
+        translateTask = Task { @MainActor [weak self] in
+            do {
+                for try await delta in stream {
+                    guard let self else { return }
+                    self.reveal()
+                    self.targetText += delta
+                }
+                self?.translationPhase = .done
+                self?.reveal()
+            } catch {
+                guard let self else { return }
+                self.translationPhase = .failed(Self.message(error))
+                self.reveal()
+            }
+        }
+    }
+
+    private func reveal() {
+        guard !revealed else { return }
+        withAnimation(.easeOut(duration: 0.35)) { revealed = true }
     }
 
     func swap() {
+        translateTask?.cancel()
+        cancelExplanations()
         let text = sourceText
         sourceText = targetText
         targetText = text
@@ -163,6 +243,16 @@ final class TranslateModel: ObservableObject {
         targetLang = lang
         sourceDetected = false
         painted = []
+        explanations = [:]
+        explanationPhases = [:]
+        activeSpanID = nil
+        lastTranslatedSource = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        translationPhase = targetText.isEmpty ? .idle : .done
+        revealed = true
+    }
+
+    static func message(_ error: Error) -> String {
+        (error as? TalkeoError)?.userMessage ?? "Something went wrong."
     }
 
     var activeSpan: PaintedSpan? {
@@ -190,6 +280,10 @@ final class TranslateModel: ObservableObject {
 
     func unpaint(_ id: String) {
         guard let index = painted.firstIndex(where: { $0.id == id }) else { return }
+        explainTasks[id]?.cancel()
+        explainTasks[id] = nil
+        explanations[id] = nil
+        explanationPhases[id] = nil
         painted.remove(at: index)
         if activeSpanID == id {
             let next = min(index, painted.count - 1)
@@ -223,6 +317,61 @@ final class TranslateModel: ObservableObject {
     func spans(in pane: TextPane) -> [PaintedSpan] {
         painted.filter { $0.pane == pane }
     }
+
+    // MARK: Explanation (highlight-to-explain)
+
+    /// Stream the explanation for the active span unless we already have it (or
+    /// it's in flight). Called whenever the active span changes, so paging back
+    /// to a span reuses its cached explanation instead of refetching.
+    func loadExplanationIfNeeded() {
+        guard let span = activeSpan else { return }
+        switch explanationPhases[span.id] {
+        case .streaming, .done:
+            return
+        default:
+            requestExplanation(for: span)
+        }
+    }
+
+    /// Retry the active span's explanation after a failure.
+    func retryActiveExplanation() {
+        if let span = activeSpan { requestExplanation(for: span) }
+    }
+
+    private func requestExplanation(for span: PaintedSpan) {
+        let id = span.id
+        explainTasks[id]?.cancel()
+        explanations[id] = ""
+        explanationPhases[id] = .streaming
+
+        // The term lives in its pane's language; explain it in the *other*
+        // language (a source-EN word explained in ES, a target-ES word in EN) —
+        // the cross-language gloss the learner wants.
+        let sentence = span.pane == .source ? sourceText : targetText
+        let termLang = span.pane == .source ? sourceLang : targetLang
+        let explainLang = span.pane == .source ? targetLang : sourceLang
+        let stream = client.explain(
+            term: span.text,
+            sentence: sentence,
+            sourceLang: termLang,
+            targetLang: explainLang
+        )
+        explainTasks[id] = Task { @MainActor [weak self] in
+            do {
+                for try await delta in stream {
+                    self?.explanations[id, default: ""] += delta
+                }
+                if !Task.isCancelled { self?.explanationPhases[id] = .done }
+            } catch {
+                if !Task.isCancelled { self?.explanationPhases[id] = .failed(TranslateModel.message(error)) }
+            }
+        }
+    }
+
+    private func cancelExplanations() {
+        explainTasks.values.forEach { $0.cancel() }
+        explainTasks = [:]
+    }
 }
 
 // MARK: - Pronunciation
@@ -248,44 +397,6 @@ enum Speaker {
         case "EN": return "en-US"
         default: return "en-US"
         }
-    }
-}
-
-// MARK: - Mock translation (Phase 1 only)
-
-enum TranslateMock {
-    /// A coherent EN→ES pair so the select-to-explain demo has rich content.
-    /// The real source comes from the selection; the revealed target is canned.
-    static let sampleSource = "The committee reached a tentative agreement after a thorough deliberation."
-    static let sampleTarget = "El comité alcanzó un acuerdo tentativo tras una deliberación exhaustiva."
-
-    static let explanations: [String: String] = [
-        // Target (ES)
-        "comité": "Grupo de personas designado para una tarea — 'committee'.",
-        "alcanzó": "Llegó a / logró algo. De 'alcanzar' — 'to reach'.",
-        "acuerdo": "Decisión común entre partes — 'agreement'.",
-        "tentativo": "Provisional, no definitivo; sujeto a confirmación — 'tentative'.",
-        "tras": "Después de — 'after' (registro formal).",
-        "deliberación": "Discutir algo con cuidado antes de decidir — 'deliberation'.",
-        "exhaustiva": "Muy completa, que no deja nada afuera — 'thorough'.",
-        // Source (EN)
-        "committee": "A group appointed for a specific function — 'comité'.",
-        "tentative": "Not certain or fixed; provisional — 'tentativo'.",
-        "agreement": "A negotiated arrangement between parties — 'acuerdo'.",
-        "thorough": "Complete, leaving nothing out — 'exhaustivo'.",
-        "deliberation": "Careful discussion before deciding — 'deliberación'.",
-    ]
-
-    static func explanation(for span: String) -> String {
-        let words = span.split(separator: " ")
-        if words.count == 1, let single = explanations[normalize(span)] {
-            return single
-        }
-        return "Significado y uso de la frase en contexto — Talkeo lo explica acá. (placeholder mock)"
-    }
-
-    static func normalize(_ word: String) -> String {
-        word.lowercased().trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
     }
 }
 
@@ -389,10 +500,8 @@ struct TranslateView: View {
                 .stroke(Palette.border, lineWidth: 1)
                 .blendMode(.overlay)
         )
-        .task(id: model.streamID) {
-            model.revealed = false
-            try? await Task.sleep(nanoseconds: 70_000_000)
-            withAnimation(.easeOut(duration: 0.35)) { model.revealed = true }
+        .onChange(of: model.activeSpanID) { _ in
+            model.loadExplanationIfNeeded()
         }
     }
 
@@ -439,7 +548,10 @@ struct TranslateView: View {
                 HStack {
                     cardLabel("Source")
                     Spacer()
-                    Button(action: { model.sourceEditing.toggle() }) {
+                    Button(action: {
+                        // "Done" commits the edit and re-translates; "Edit" opens editing.
+                        if model.sourceEditing { model.retranslate() } else { model.sourceEditing = true }
+                    }) {
                         HStack(spacing: 4) {
                             Image(systemName: model.sourceEditing ? "checkmark" : "pencil")
                                 .font(.system(size: 10, weight: .semibold))
@@ -484,22 +596,34 @@ struct TranslateView: View {
         card {
             VStack(alignment: .leading, spacing: 6) {
                 cardLabel("Translation")
-                SelectableText(
-                    text: model.targetText,
-                    isEditable: false,
-                    highlights: model.spans(in: .target),
-                    activeID: model.activeSpanID,
-                    collapseToken: targetCollapse,
-                    onSelect: { selection in
-                        guard let selection else { return }
-                        model.paint(pane: .target, range: selection.range, text: selection.text)
-                        targetCollapse += 1
-                    },
-                    onCaret: { location in model.focusSpan(in: .target, at: location) }
-                )
+                ZStack(alignment: .topLeading) {
+                    if case let .failed(message) = model.translationPhase {
+                        paneError(message) { model.retryTranslation() }
+                    } else {
+                        SelectableText(
+                            text: model.targetText,
+                            isEditable: false,
+                            highlights: model.spans(in: .target),
+                            activeID: model.activeSpanID,
+                            collapseToken: targetCollapse,
+                            onSelect: { selection in
+                                guard let selection else { return }
+                                model.paint(pane: .target, range: selection.range, text: selection.text)
+                                targetCollapse += 1
+                            },
+                            onCaret: { location in model.focusSpan(in: .target, at: location) }
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .opacity(model.revealed ? 1 : 0)
+                        .blur(radius: model.revealed ? 0 : 6)
+                        if model.translationPhase == .streaming, model.targetText.isEmpty {
+                            Text("Translating…")
+                                .font(.system(size: 13))
+                                .foregroundStyle(Palette.tertiary)
+                        }
+                    }
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .opacity(model.revealed ? 1 : 0)
-                .blur(radius: model.revealed ? 0 : 6)
                 actionRow(text: model.targetText, lang: model.targetLang)
                     .opacity(targetHover ? 1 : 0)
             }
@@ -564,10 +688,7 @@ struct TranslateView: View {
                 .help("Remove highlight")
                 .opacity(focusHover ? 1 : 0)
             }
-            Text(TranslateMock.explanation(for: span.text))
-                .font(.system(size: 13))
-                .foregroundStyle(Palette.muted)
-                .fixedSize(horizontal: false, vertical: true)
+            explanationBody(span)
 
             Spacer(minLength: 0)
 
@@ -579,6 +700,52 @@ struct TranslateView: View {
         }
         .padding(4)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// The streamed contextual explanation for a painted span, with loading and
+    /// error states matching the translation pane.
+    @ViewBuilder
+    private func explanationBody(_ span: PaintedSpan) -> some View {
+        if case let .failed(message) = model.explanationPhases[span.id] {
+            paneError(message) { model.retryActiveExplanation() }
+        } else {
+            let text = model.explanations[span.id] ?? ""
+            if text.isEmpty, model.explanationPhases[span.id] == .streaming {
+                Text("Explaining…")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Palette.tertiary)
+            } else {
+                Text(text)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Palette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Inline error with a Retry affordance, shared by the translation pane and
+    /// the explanation card.
+    private func paneError(_ message: String, retry: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 12, weight: .medium))
+                Text(message)
+                    .font(.system(size: 12))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundStyle(Palette.muted)
+            Button(action: retry) {
+                Text("Retry")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Palette.foreground)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Palette.elevated))
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     /// Listen to the active word (primary action), plus a chevron to pick the
@@ -929,18 +1096,39 @@ private final class PaintTextView: NSTextView {
 
 // MARK: - Previews
 
+/// Canned `TransformClient` so the SwiftUI preview renders without a backend.
+private struct PreviewTransformClient: TransformClient {
+    func translate(text: String, sourceLang: String?, targetLang: String) -> AsyncThrowingStream<String, Error> {
+        Self.canned("El comité alcanzó un acuerdo tentativo tras una deliberación exhaustiva.")
+    }
+
+    func explain(term: String, sentence: String, sourceLang: String?, targetLang: String) -> AsyncThrowingStream<String, Error> {
+        Self.canned("Provisional, no definitivo; sujeto a confirmación — 'tentative'.")
+    }
+
+    private static func canned(_ text: String) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(text)
+            continuation.finish()
+        }
+    }
+}
+
 private struct TranslatePreview: View {
-    @StateObject private var model = TranslateModel()
+    @StateObject private var model = TranslateModel(client: PreviewTransformClient())
     var body: some View {
         TranslateView(model: model, onClose: {})
             .padding(40)
             .onAppear {
-                model.sourceText = TranslateMock.sampleSource
-                model.targetText = TranslateMock.sampleTarget
+                model.sourceText = "The committee reached a tentative agreement after a thorough deliberation."
+                model.targetText = "El comité alcanzó un acuerdo tentativo tras una deliberación exhaustiva."
                 model.revealed = true
+                model.translationPhase = .done
                 let span = PaintedSpan(pane: .target, range: NSRange(location: 21, length: 18), text: "acuerdo tentativo")
                 model.painted = [span]
                 model.activeSpanID = span.id
+                model.explanations[span.id] = "Acuerdo provisional, no definitivo; sujeto a confirmación."
+                model.explanationPhases[span.id] = .done
             }
     }
 }
