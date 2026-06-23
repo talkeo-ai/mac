@@ -4,13 +4,25 @@ final class StatusBarController {
     private let statusItem: NSStatusItem
     private let isTrusted: () -> Bool
     private let requestPermission: () -> Void
+    private let isFloatingBarVisible: () -> Bool
+    private let toggleFloatingBar: () -> Void
+    private let isAutoHide: () -> Bool
+    private let toggleAutoHide: () -> Void
     private let quit: () -> Void
 
     init(isTrusted: @escaping () -> Bool,
          requestPermission: @escaping () -> Void,
+         isFloatingBarVisible: @escaping () -> Bool,
+         toggleFloatingBar: @escaping () -> Void,
+         isAutoHide: @escaping () -> Bool,
+         toggleAutoHide: @escaping () -> Void,
          quit: @escaping () -> Void) {
         self.isTrusted = isTrusted
         self.requestPermission = requestPermission
+        self.isFloatingBarVisible = isFloatingBarVisible
+        self.toggleFloatingBar = toggleFloatingBar
+        self.isAutoHide = isAutoHide
+        self.toggleAutoHide = toggleAutoHide
         self.quit = quit
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         configureButton()
@@ -48,6 +60,17 @@ final class StatusBarController {
 
         menu.addItem(.separator())
 
+        let bar = NSMenuItem(title: floatingBarLine(), action: #selector(MenuActions.toggleFloatingBar(_:)), keyEquivalent: "")
+        bar.target = MenuActions.shared
+        menu.addItem(bar)
+
+        let auto = NSMenuItem(title: "Auto-hide bar", action: #selector(MenuActions.toggleAutoHide(_:)), keyEquivalent: "")
+        auto.target = MenuActions.shared
+        auto.state = isAutoHide() ? .on : .off
+        menu.addItem(auto)
+
+        menu.addItem(.separator())
+
         let quitItem = NSMenuItem(title: "Quit Talkeo", action: #selector(MenuActions.quit(_:)), keyEquivalent: "q")
         quitItem.target = MenuActions.shared
         menu.addItem(quitItem)
@@ -59,12 +82,25 @@ final class StatusBarController {
         isTrusted() ? "Talkeo · ready" : "Talkeo · no permission"
     }
 
+    fileprivate func floatingBarLine() -> String {
+        isFloatingBarVisible() ? "Hide floating bar" : "Show floating bar"
+    }
+
     fileprivate func refreshStatus() {
         guard let menu = statusItem.menu, let first = menu.items.first else { return }
         first.title = statusLine()
+        if let bar = menu.items.first(where: { $0.action == #selector(MenuActions.toggleFloatingBar(_:)) }) {
+            bar.title = floatingBarLine()
+        }
+        if let auto = menu.items.first(where: { $0.action == #selector(MenuActions.toggleAutoHide(_:)) }) {
+            auto.state = isAutoHide() ? .on : .off
+            auto.isEnabled = isFloatingBarVisible()
+        }
     }
 
     fileprivate func triggerRequest() { requestPermission() }
+    fileprivate func triggerToggleFloatingBar() { toggleFloatingBar() }
+    fileprivate func triggerToggleAutoHide() { toggleAutoHide() }
     fileprivate func triggerQuit() { quit() }
 }
 
@@ -75,6 +111,8 @@ final class MenuActions: NSObject {
     weak var controller: StatusBarController?
 
     @objc func requestPermission(_ sender: Any?) { controller?.triggerRequest() }
+    @objc func toggleFloatingBar(_ sender: Any?) { controller?.triggerToggleFloatingBar() }
+    @objc func toggleAutoHide(_ sender: Any?) { controller?.triggerToggleAutoHide() }
     @objc func quit(_ sender: Any?) { controller?.triggerQuit() }
 }
 

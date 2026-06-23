@@ -31,7 +31,25 @@ for asset in Resources/*.png Resources/*.icns Resources/*.jpg; do
 done
 shopt -u nullglob
 
-# Ad-hoc sign so macOS lets it run + remembers AX permission per build
-codesign --force --deep --sign - "$APP_BUNDLE"
+# Sign with a stable identity so macOS keeps the Accessibility (TCC) grant
+# across rebuilds. TCC keys on the code-signing designated requirement; an
+# ad-hoc signature's hash changes every build, so each build looks like a new
+# app and re-prompts for permission. Prefer a real Apple Development / Developer
+# ID identity (override with TALKEO_SIGN_IDENTITY); fall back to ad-hoc only when
+# no signing certificate is installed (contributors will then be re-prompted).
+SIGN_IDENTITY="${TALKEO_SIGN_IDENTITY:-}"
+if [[ -z "$SIGN_IDENTITY" ]]; then
+    SIGN_IDENTITY=$(security find-identity -v -p codesigning \
+        | awk -F'"' '/Apple Development|Developer ID Application/ {print $2; exit}')
+fi
+
+if [[ -n "$SIGN_IDENTITY" ]]; then
+    echo "[sign] $SIGN_IDENTITY"
+    codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+else
+    echo "[sign] WARNING: no signing identity found — ad-hoc signing." >&2
+    echo "[sign] macOS will re-prompt for Accessibility on every build." >&2
+    codesign --force --deep --sign - "$APP_BUNDLE"
+fi
 
 echo "[done] $APP_BUNDLE ready. Run with: open ./$APP_BUNDLE"

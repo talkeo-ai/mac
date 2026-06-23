@@ -6,14 +6,20 @@ import CoreGraphics
 /// multi-click word/line selection).
 final class MouseUpMonitor {
     private let onSelection: () -> Void
+    private let onDeselect: (() -> Void)?
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var downLocation: CGPoint?
     private var didDrag: Bool = false
     private var started: Bool = false
 
-    init(onSelection: @escaping () -> Void) {
+    /// `onSelection` fires after a mouse-up that looks like it made a selection.
+    /// `onDeselect` fires on a plain single click — the usual way a selection is
+    /// collapsed — so observers can cheaply clear "has selection" state without
+    /// running the (clipboard-touching) reader on every click.
+    init(onSelection: @escaping () -> Void, onDeselect: (() -> Void)? = nil) {
         self.onSelection = onSelection
+        self.onDeselect = onDeselect
     }
 
     func start() {
@@ -100,6 +106,11 @@ final class MouseUpMonitor {
             if candidate {
                 DispatchQueue.main.async { [onSelection] in
                     onSelection()
+                }
+            } else {
+                // A plain single click collapses any selection — clear cheaply.
+                DispatchQueue.main.async { [onDeselect] in
+                    onDeselect?()
                 }
             }
         default:

@@ -12,12 +12,28 @@ protocol TransformClient {
         targetLang: String
     ) -> AsyncThrowingStream<String, Error>
 
-    func explain(
+    /// Highlight-to-explain: a structured vocabulary card for `term` as used in
+    /// `sentence` (talkeo-ai/talkeo#27). Unlike translate/improve this is a short
+    /// JSON response, not a stream. Throws `TalkeoError` on failure.
+    func explainCard(
         term: String,
         sentence: String,
         sourceLang: String?,
         targetLang: String
-    ) -> AsyncThrowingStream<String, Error>
+    ) async throws -> ExplainCard
+}
+
+extension TransformClient {
+    /// Default so non-network conformers (e.g. SwiftUI previews) need not provide
+    /// it. The real network client overrides this.
+    func explainCard(
+        term: String,
+        sentence: String,
+        sourceLang: String?,
+        targetLang: String
+    ) async throws -> ExplainCard {
+        throw TalkeoError.transport("explainCard not implemented")
+    }
 }
 
 /// Default `TransformClient` backed by the Talkeo HTTP API over SSE. It is a
@@ -48,19 +64,55 @@ struct TalkeoTransformClient: TransformClient {
         return stream(path: "/api/v1/transform/translate", body: body)
     }
 
-    func explain(
+    func explainCard(
         term: String,
         sentence: String,
         sourceLang: String?,
         targetLang: String
-    ) -> AsyncThrowingStream<String, Error> {
+    ) async throws -> ExplainCard {
         var body: [String: String] = [
             "term": term,
             "sentence": sentence,
             "target_lang": targetLang,
         ]
         if let sourceLang { body["source_lang"] = sourceLang }
-        return stream(path: "/api/v1/transform/explain", body: body)
+
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else {
+            throw TalkeoError.transport("invalid request")
+        }
+        var request = URLRequest(url: config.baseURL.appendingPathComponent("/api/v1/transform/explain"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = data
+
+        let response: (Data, URLResponse)
+        do {
+            response = try await URLSession.shared.data(for: request)
+        } catch {
+            throw TalkeoError.transport((error as? URLError)?.localizedDescription ?? "network error")
+        }
+        let (payload, urlResponse) = response
+        guard let http = urlResponse as? HTTPURLResponse else {
+            throw TalkeoError.transport("no response")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            // The API returns {code, message} on error.
+            if let err = try? JSONDecoder().decode(APIError.self, from: payload) {
+                throw TalkeoError.http(status: http.statusCode, code: err.code, message: err.message)
+            }
+            throw TalkeoError.http(status: http.statusCode, code: "http_error", message: "Request failed.")
+        }
+        do {
+            return try JSONDecoder().decode(ExplainCard.self, from: payload)
+        } catch {
+            throw TalkeoError.transport("Couldn't read the response.")
+        }
+    }
+
+    private struct APIError: Decodable {
+        let code: String
+        let message: String
     }
 
     private func stream(path: String, body: [String: String]) -> AsyncThrowingStream<String, Error> {
