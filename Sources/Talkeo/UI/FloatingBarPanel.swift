@@ -47,6 +47,9 @@ final class FloatingBarPanel {
     private var pollTimer: Timer?
     private var slideTimer: Timer?
     private var cursorMonitors: [Any] = []
+    /// The screen the bar is pinned to. Cached so it never flips to an adjacent
+    /// display when auto-hide slides the panel partly off the edge.
+    private var homeScreen: NSScreen?
     /// Slide duration for the reveal/retract.
     private static let slideDuration: CFTimeInterval = 0.16
 
@@ -231,12 +234,17 @@ final class FloatingBarPanel {
         }
     }
 
-    /// The screen the bar lives on — the one intersecting its current frame, so
-    /// positioning is stable regardless of which app has key focus (unlike
-    /// `NSScreen.main`, which follows the key window).
+    /// The screen the bar lives on, pinned for the session. Picked once from the
+    /// panel's frame and cached, so auto-hide sliding the panel past the right
+    /// edge (where it can overlap an adjacent display) never makes it jump
+    /// screens. Re-picks only if the cached screen was disconnected.
     private func barScreen() -> NSScreen? {
+        if let homeScreen, NSScreen.screens.contains(homeScreen) { return homeScreen }
         let f = panel.frame
-        return NSScreen.screens.first { $0.frame.intersects(f) } ?? NSScreen.main ?? NSScreen.screens.first
+        let screen = NSScreen.screens.first { $0.frame.intersects(f) }
+            ?? NSScreen.main ?? NSScreen.screens.first
+        homeScreen = screen
+        return screen
     }
 
     /// Shared vertical center, so shown and hidden states never disagree on Y.

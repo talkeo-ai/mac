@@ -318,6 +318,7 @@ final class QuickTranslateModel: ObservableObject {
     func showHistory() {
         task?.cancel()
         clearSelection()
+        sourceEditing = false
         historyEntries = history.all()
         mode = .history
     }
@@ -326,6 +327,7 @@ final class QuickTranslateModel: ObservableObject {
     func open(_ entry: HistoryEntry) {
         task?.cancel()
         clearSelection()
+        sourceEditing = false
         sourceText = entry.source
         targetText = entry.target
         detectedLang = entry.detectedLang
@@ -604,6 +606,7 @@ struct QuickTranslateView: View {
                     text: isSource ? model.sourceText : model.targetText,
                     height: height,
                     width: QuickTranslateView.width - 32,
+                    maxHeight: 240,
                     highlights: model.highlights(for: pane),
                     isEditable: editing,
                     onTextChange: { if isSource { model.sourceText = $0 } },
@@ -997,6 +1000,9 @@ private struct SelectableText: NSViewRepresentable {
     @Binding var height: CGFloat
     /// The width the text lays out in — used to measure height deterministically.
     var width: CGFloat
+    /// Cap the box height; past it the text scrolls internally instead of growing
+    /// the popover off-screen.
+    var maxHeight: CGFloat = .greatestFiniteMagnitude
     /// Persistent markers for the words already picked, and which one is focused.
     var highlights: [(range: NSRange, active: Bool)] = []
     /// When true the view is an editable input (no marking); Enter commits.
@@ -1023,18 +1029,24 @@ private struct SelectableText: NSViewRepresentable {
         Coordinator(onSelect: onSelect, onTextChange: onTextChange, onCommit: onCommit)
     }
 
-    func makeNSView(context: Context) -> NSTextView {
+    func makeNSView(context: Context) -> NSScrollView {
         let textView = WordSelectingTextView()
         textView.isSelectable = true
         textView.drawsBackground = false
         textView.isRichText = false
-        textView.isHorizontallyResizable = false
         textView.font = .systemFont(ofSize: 16)
         textView.textColor = Palette.nsForeground
         textView.insertionPointColor = Palette.nsForeground
         textView.textContainerInset = NSSize(width: 0, height: 1)
+        // Standard "text view inside a scroll view" setup so long text scrolls.
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.lineFragmentPadding = 0
         textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.delegate = context.coordinator
 
         let coordinator = context.coordinator
@@ -1052,10 +1064,20 @@ private struct SelectableText: NSViewRepresentable {
                 textView?.setSelectedRange(NSRange(location: NSMaxRange(snapped), length: 0))
             }
         }
-        return textView
+
+        let scroll = NSScrollView()
+        scroll.documentView = textView
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.scrollerStyle = .overlay // doesn't take width, so wrapping is stable
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        return scroll
     }
 
-    func updateNSView(_ textView: NSTextView, context: Context) {
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        guard let textView = scroll.documentView as? WordSelectingTextView else { return }
         let coordinator = context.coordinator
         coordinator.onSelect = onSelect
         coordinator.onTextChange = onTextChange
@@ -1065,6 +1087,7 @@ private struct SelectableText: NSViewRepresentable {
         if textView.string != text {
             textView.string = text
             applyAttributes(textView)
+            scroll.documentView?.scroll(.zero) // show the top of new text
         }
         // Take focus + caret at end when editing turns on.
         if isEditable, !coordinator.wasEditable {
@@ -1078,13 +1101,14 @@ private struct SelectableText: NSViewRepresentable {
 
         // Markers only in read mode (editing invalidates ranges).
         let length = (textView.string as NSString).length
-        if let marked = textView as? WordSelectingTextView {
-            marked.markers = isEditable ? [] : highlights.filter { NSMaxRange($0.range) <= length }
-            marked.needsDisplay = true
-        }
-        // Report a deterministic height (text + width), not the live text view's
-        // — that raced with layout and clipped.
-        let target = SelectableText.height(of: text, width: width)
+        textView.markers = isEditable ? [] : highlights.filter { NSMaxRange($0.range) <= length }
+        textView.needsDisplay = true
+
+        // Deterministic content height (text + width), capped — past the cap the
+        // scroll view takes over instead of the popover growing off-screen.
+        let full = SelectableText.height(of: text, width: width)
+        let target = min(full, maxHeight)
+        scroll.hasVerticalScroller = full > maxHeight + 0.5
         if abs(target - height) > 0.5 {
             DispatchQueue.main.async { height = target }
         }
