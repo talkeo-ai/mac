@@ -75,6 +75,11 @@ final class QuickTranslatePanel {
 
     func show(text: String) {
         model.translate(text)
+        // A single word goes straight to its explain card (the translation still
+        // streams in the background, so removing the card falls back to it).
+        if QuickTranslateModel.isSingleWord(text) {
+            model.explainWholeSource()
+        }
         present()
     }
 
@@ -177,6 +182,10 @@ final class QuickTranslateModel: ObservableObject {
     @Published var mode: Mode = .translate
     @Published var historyEntries: [HistoryEntry] = []
 
+    /// When true the detected (source) box is an editable input: typing changes
+    /// the text and selecting does not mark terms; confirming re-translates.
+    @Published var sourceEditing: Bool = false
+
     /// A highlighted term plus the context the explain endpoint needs (the
     /// sentence and explain direction) and where it sits, so the text can draw a
     /// persistent marker over it.
@@ -210,6 +219,22 @@ final class QuickTranslateModel: ObservableObject {
         pane == .source ? detectedLang : translateLang
     }
 
+    /// True when the selection is a single token (no internal whitespace), so we
+    /// can jump straight to explaining it instead of translating.
+    static func isSingleWord(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        return !trimmed.unicodeScalars.contains { CharacterSet.whitespacesAndNewlines.contains($0) }
+    }
+
+    /// Select the whole source text as the active term and explain it directly.
+    /// Used when the user picked a single word — skips the manual highlight step.
+    func explainWholeSource() {
+        let ns = sourceText as NSString
+        guard ns.length > 0 else { return }
+        explain(term: sourceText, pane: .source, range: NSRange(location: 0, length: ns.length))
+    }
+
     /// Detect whether `text` is English or Spanish (the only two we support),
     /// picking whichever the recognizer rates higher; defaults to English.
     static func detectLanguage(_ text: String) -> String {
@@ -240,6 +265,7 @@ final class QuickTranslateModel: ObservableObject {
         task?.cancel()
         clearSelection()
         mode = .translate
+        sourceEditing = false
         sourceText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         targetText = ""
         revealed = false
@@ -318,6 +344,37 @@ final class QuickTranslateModel: ObservableObject {
     func clearHistory() {
         history.clear()
         historyEntries = []
+    }
+
+    // MARK: Editing the source
+
+    /// Make the detected box editable (drops any picked terms, since editing
+    /// invalidates their offsets).
+    func beginEdit() {
+        task?.cancel()
+        clearSelection()
+        mode = .translate
+        sourceEditing = true
+    }
+
+    /// Confirm the edit and re-translate the (possibly changed) text.
+    func commitEdit() {
+        let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        sourceEditing = false
+        guard !text.isEmpty else { return }
+        translate(text)
+    }
+
+    /// Open an empty editable input to translate something from scratch.
+    func startBlank() {
+        task?.cancel()
+        clearSelection()
+        mode = .translate
+        sourceText = ""
+        targetText = ""
+        revealed = false
+        phase = .idle
+        sourceEditing = true
     }
 
     private func reveal() {
@@ -456,9 +513,12 @@ struct QuickTranslateView: View {
                 cardSection
             } else {
                 // No selection yet: detected text on top, its translation below.
+                // While editing the source, only the input shows.
                 paneView(.source, withClose: true, height: $sourceHeight)
-                Divider().overlay(Palette.border).opacity(0.6)
-                paneView(.target, withClose: false, height: $targetHeight)
+                if !model.sourceEditing {
+                    Divider().overlay(Palette.border).opacity(0.6)
+                    paneView(.target, withClose: false, height: $targetHeight)
+                }
             }
         }
         .padding(16)
@@ -493,11 +553,18 @@ struct QuickTranslateView: View {
         let isSource = pane == .source
         let text = isSource ? model.sourceText : model.targetText
         let isEnglish = model.language(for: pane) == "EN"
+        let editing = isSource && model.sourceEditing
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 cardLabel(QuickTranslateModel.languageName(model.language(for: pane)))
                 Spacer()
-                if !text.isEmpty {
+                // Edit the detected text (pencil), or confirm it (checkmark).
+                if isSource {
+                    QuickIconButton(system: editing ? "checkmark" : "pencil") {
+                        if model.sourceEditing { model.commitEdit() } else { model.beginEdit() }
+                    }
+                }
+                if !text.isEmpty, !editing {
                     // Listen only for English — never read the Spanish side aloud.
                     if isEnglish {
                         QuickIconButton(system: "speaker.wave.2") {
@@ -529,6 +596,7 @@ struct QuickTranslateView: View {
     @ViewBuilder
     private func paneText(_ pane: QuickTranslateModel.Pane, height: Binding<CGFloat>) -> some View {
         let isSource = pane == .source
+        let editing = isSource && model.sourceEditing
         if !isSource, case let .failed(message) = model.phase {
             translationError(message)
         } else {
@@ -536,7 +604,11 @@ struct QuickTranslateView: View {
                 SelectableText(
                     text: isSource ? model.sourceText : model.targetText,
                     height: height,
-                    highlights: model.highlights(for: pane)
+                    width: QuickTranslateView.width - 32,
+                    highlights: model.highlights(for: pane),
+                    isEditable: editing,
+                    onTextChange: { if isSource { model.sourceText = $0 } },
+                    onCommit: { if isSource { model.commitEdit() } }
                 ) { term, range in
                     model.explain(term: term, pane: pane, range: range)
                 }
@@ -544,7 +616,13 @@ struct QuickTranslateView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .opacity(isSource || model.revealed ? 1 : 0)
                 .blur(radius: isSource || model.revealed ? 0 : 5)
-                if !isSource, model.phase == .streaming, model.targetText.isEmpty {
+
+                if editing, model.sourceText.isEmpty {
+                    Text("Type or paste text to translate, then press Return.")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Palette.tertiary)
+                        .allowsHitTesting(false)
+                } else if !isSource, model.phase == .streaming, model.targetText.isEmpty {
                     Text("Translating…")
                         .font(.system(size: 13))
                         .foregroundStyle(Palette.tertiary)
@@ -610,12 +688,26 @@ struct QuickTranslateView: View {
                 .handCursor()
             }
 
+            // Start a fresh translation from a blank input.
+            Button(action: { model.startBlank() }) {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.and.pencil").font(.system(size: 13, weight: .semibold))
+                    Text("New translation").font(.system(size: 13, weight: .medium))
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(Palette.foreground)
+                .padding(.vertical, 9)
+                .padding(.horizontal, 10)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.elevated.opacity(0.5)))
+            }
+            .buttonStyle(.plain)
+            .handCursor()
+
             if model.historyEntries.isEmpty {
-                Text("No translations yet.\nSelect text and tap Translate.")
+                Text("No translations yet.")
                     .font(.system(size: 12.5))
                     .foregroundStyle(Palette.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 2)
             } else {
                 ScrollView {
                     VStack(spacing: 2) {
@@ -904,28 +996,52 @@ private struct ExplainCardView: View {
 private struct SelectableText: NSViewRepresentable {
     let text: String
     @Binding var height: CGFloat
+    /// The width the text lays out in — used to measure height deterministically.
+    var width: CGFloat
     /// Persistent markers for the words already picked, and which one is focused.
     var highlights: [(range: NSRange, active: Bool)] = []
+    /// When true the view is an editable input (no marking); Enter commits.
+    var isEditable: Bool = false
+    var onTextChange: (String) -> Void = { _ in }
+    var onCommit: () -> Void = {}
     var onSelect: (String, NSRange) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(onSelect: onSelect) }
+    /// Height of `text` at `width`, computed up front so the popover never sizes
+    /// from a half-laid-out text view (which clipped, variably).
+    static func height(of text: String, width: CGFloat) -> CGFloat {
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = 3
+        let measured = (text.isEmpty ? " " : text) as NSString
+        let rect = measured.boundingRect(
+            with: NSSize(width: max(width, 1), height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: NSFont.systemFont(ofSize: 16), .paragraphStyle: para]
+        )
+        return ceil(rect.height) + 6
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSelect: onSelect, onTextChange: onTextChange, onCommit: onCommit)
+    }
 
     func makeNSView(context: Context) -> NSTextView {
         let textView = WordSelectingTextView()
-        textView.isEditable = false
         textView.isSelectable = true
         textView.drawsBackground = false
         textView.isRichText = false
         textView.isHorizontallyResizable = false
         textView.font = .systemFont(ofSize: 16)
         textView.textColor = Palette.nsForeground
+        textView.insertionPointColor = Palette.nsForeground
         textView.textContainerInset = NSSize(width: 0, height: 1)
         textView.textContainer?.lineFragmentPadding = 0
         textView.textContainer?.widthTracksTextView = true
+        textView.delegate = context.coordinator
 
         let coordinator = context.coordinator
         textView.onSettled = { [weak textView] in
-            guard let textView else { return }
+            // No marking while editing — clicks just place the caret.
+            guard let textView, !textView.isEditable else { return }
             let raw = textView.selectedRange()
             guard raw.length > 0 else { return }
             let ns = textView.string as NSString
@@ -941,38 +1057,81 @@ private struct SelectableText: NSViewRepresentable {
     }
 
     func updateNSView(_ textView: NSTextView, context: Context) {
-        context.coordinator.onSelect = onSelect
+        let coordinator = context.coordinator
+        coordinator.onSelect = onSelect
+        coordinator.onTextChange = onTextChange
+        coordinator.onCommit = onCommit
+
+        textView.isEditable = isEditable
         if textView.string != text {
             textView.string = text
-            textView.textColor = Palette.nsForeground
-            // Apply line spacing across the whole text for readability.
-            let full = NSRange(location: 0, length: (textView.string as NSString).length)
-            let para = NSMutableParagraphStyle()
-            para.lineSpacing = 3
-            textView.textStorage?.addAttributes([
-                .font: NSFont.systemFont(ofSize: 16),
-                .foregroundColor: Palette.nsForeground,
-                .paragraphStyle: para,
-            ], range: full)
+            applyAttributes(textView)
         }
-        // Draw the selected-word markers (drop any whose range fell out of bounds).
+        // Take focus + caret at end when editing turns on.
+        if isEditable, !coordinator.wasEditable {
+            DispatchQueue.main.async { [weak textView] in
+                guard let textView else { return }
+                textView.window?.makeFirstResponder(textView)
+                textView.setSelectedRange(NSRange(location: (textView.string as NSString).length, length: 0))
+            }
+        }
+        coordinator.wasEditable = isEditable
+
+        // Markers only in read mode (editing invalidates ranges).
         let length = (textView.string as NSString).length
         if let marked = textView as? WordSelectingTextView {
-            marked.markers = highlights.filter { NSMaxRange($0.range) <= length }
+            marked.markers = isEditable ? [] : highlights.filter { NSMaxRange($0.range) <= length }
             marked.needsDisplay = true
         }
-        // Measure the laid-out height for the current width and report it up.
-        guard let lm = textView.layoutManager, let tc = textView.textContainer else { return }
-        lm.ensureLayout(for: tc)
-        let measured = ceil(lm.usedRect(for: tc).height) + 2
-        if abs(measured - height) > 0.5 {
-            DispatchQueue.main.async { height = measured }
+        // Report a deterministic height (text + width), not the live text view's
+        // — that raced with layout and clipped.
+        let target = SelectableText.height(of: text, width: width)
+        if abs(target - height) > 0.5 {
+            DispatchQueue.main.async { height = target }
         }
     }
 
-    final class Coordinator {
+    private func applyAttributes(_ textView: NSTextView) {
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = 3
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 16),
+            .foregroundColor: Palette.nsForeground,
+            .paragraphStyle: para,
+        ]
+        textView.textColor = Palette.nsForeground
+        textView.typingAttributes = attrs
+        let full = NSRange(location: 0, length: (textView.string as NSString).length)
+        if full.length > 0 { textView.textStorage?.addAttributes(attrs, range: full) }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
         var onSelect: (String, NSRange) -> Void
-        init(onSelect: @escaping (String, NSRange) -> Void) { self.onSelect = onSelect }
+        var onTextChange: (String) -> Void
+        var onCommit: () -> Void
+        var wasEditable = false
+
+        init(onSelect: @escaping (String, NSRange) -> Void,
+             onTextChange: @escaping (String) -> Void,
+             onCommit: @escaping () -> Void) {
+            self.onSelect = onSelect
+            self.onTextChange = onTextChange
+            self.onCommit = onCommit
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            onTextChange(textView.string)
+        }
+
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            // Enter confirms the edit instead of inserting a newline.
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                onCommit()
+                return true
+            }
+            return false
+        }
     }
 }
 
@@ -1055,22 +1214,32 @@ private struct HistoryRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Text("\(entry.detectedLang) → \(entry.translateLang)")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(Palette.tertiary)
-                .frame(width: 54, alignment: .leading)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.source)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Palette.foreground)
-                    .lineLimit(1)
-                Text(entry.target)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Palette.muted)
-                    .lineLimit(1)
+            // A real Button (not onTapGesture) so the first click registers even
+            // when the panel isn't key — tap gestures ignore acceptsFirstMouse.
+            Button(action: onOpen) {
+                HStack(alignment: .top, spacing: 10) {
+                    Text("\(entry.detectedLang) → \(entry.translateLang)")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Palette.tertiary)
+                        .frame(width: 54, alignment: .leading)
+                        .padding(.top, 2)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(entry.source)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Palette.foreground)
+                            .lineLimit(1)
+                        Text(entry.target)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(Palette.muted)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 6)
+                }
+                .contentShape(Rectangle())
             }
-            Spacer(minLength: 6)
+            .buttonStyle(.plain)
+            .handCursor()
+
             if hover {
                 Button(action: onDelete) {
                     Image(systemName: "xmark")
@@ -1096,10 +1265,7 @@ private struct HistoryRow: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(hover ? Palette.elevated.opacity(0.5) : Color.clear)
         )
-        .contentShape(Rectangle())
-        .onTapGesture { onOpen() }
         .onHover { hover = $0 }
-        .handCursor()
     }
 
     static func relative(_ date: Date) -> String {
