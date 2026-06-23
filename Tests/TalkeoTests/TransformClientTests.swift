@@ -51,17 +51,4 @@ final class TransformClientTests: XCTestCase {
 
         XCTAssertEqual(body(capture.request), ["text": "hello", "target_lang": "ES", "source_lang": "EN"])
     }
-
-    func testExplainBodyShape() async {
-        let capture = Capture()
-        let client = TalkeoTransformClient(config: TalkeoConfig(baseURL: URL(string: "http://localhost:8000")!), send: capture.send)
-
-        _ = await collect(client.explain(term: "tentative", sentence: "a tentative deal", sourceLang: "EN", targetLang: "ES"))
-
-        XCTAssertEqual(capture.request?.url?.path, "/api/v1/transform/explain")
-        XCTAssertEqual(
-            body(capture.request),
-            ["term": "tentative", "sentence": "a tentative deal", "source_lang": "EN", "target_lang": "ES"]
-        )
-    }
 }

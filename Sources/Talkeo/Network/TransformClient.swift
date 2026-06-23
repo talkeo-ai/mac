@@ -12,13 +12,6 @@ protocol TransformClient {
         targetLang: String
     ) -> AsyncThrowingStream<String, Error>
 
-    func explain(
-        term: String,
-        sentence: String,
-        sourceLang: String?,
-        targetLang: String
-    ) -> AsyncThrowingStream<String, Error>
-
     /// Highlight-to-explain: a structured vocabulary card for `term` as used in
     /// `sentence` (talkeo-ai/talkeo#27). Unlike translate/improve this is a short
     /// JSON response, not a stream. Throws `TalkeoError` on failure.
@@ -69,21 +62,6 @@ struct TalkeoTransformClient: TransformClient {
         var body: [String: String] = ["text": text, "target_lang": targetLang]
         if let sourceLang { body["source_lang"] = sourceLang }
         return stream(path: "/api/v1/transform/translate", body: body)
-    }
-
-    func explain(
-        term: String,
-        sentence: String,
-        sourceLang: String?,
-        targetLang: String
-    ) -> AsyncThrowingStream<String, Error> {
-        var body: [String: String] = [
-            "term": term,
-            "sentence": sentence,
-            "target_lang": targetLang,
-        ]
-        if let sourceLang { body["source_lang"] = sourceLang }
-        return stream(path: "/api/v1/transform/explain", body: body)
     }
 
     func explainCard(

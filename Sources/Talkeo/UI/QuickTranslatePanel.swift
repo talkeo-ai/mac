@@ -6,11 +6,10 @@ import SwiftUI
 /// Translate action. It sizes itself to content, can't be moved, and sits at the
 /// right margin so it stays out of the way.
 ///
-/// Two parts: translation (Original / target-language tabs) and the learning
-/// core — **select any word or phrase in the shown text to see a structured
-/// vocabulary card below** (meaning, category, examples, a typed insight). This
-/// is the comfortable, compact take on the v1 `TranslatePanel` highlight-to-
-/// explain. It dismisses on a click anywhere outside it.
+/// Two parts: the translation (detected language and its translation) and the
+/// learning core — **select any word or phrase to see a structured vocabulary
+/// card below** (meaning, examples, a typed insight). It dismisses on a click
+/// anywhere outside it.
 ///
 /// The panel stays non-activating (it never steals focus when it appears) but
 /// can become key, so clicking into it to select text works.
@@ -1305,8 +1304,7 @@ private struct QuickSizeKey: PreferenceKey {
     }
 }
 
-/// Local native vibrancy backing (the file-private one in TranslatePanel.swift
-/// isn't visible here).
+/// Native vibrancy backing for the popover's frosted surface.
 private struct QuickVisualEffectView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
@@ -1326,9 +1324,6 @@ private struct QuickPreviewClient: TransformClient {
             c.yield("El comité alcanzó un acuerdo tentativo tras una deliberación exhaustiva.")
             c.finish()
         }
-    }
-    func explain(term: String, sentence: String, sourceLang: String?, targetLang: String) -> AsyncThrowingStream<String, Error> {
-        AsyncThrowingStream { $0.finish() }
     }
 }
 

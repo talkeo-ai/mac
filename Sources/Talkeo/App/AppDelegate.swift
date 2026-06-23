@@ -9,8 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let permission = AccessibilityPermission()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Compact translation popover. The full TranslatePanel and the selection
-        // tooltip both exist in the tree but stay disconnected for now.
+        // Compact translate + learn popover. (The selection tooltip still exists
+        // in the tree but stays disconnected for now.)
         quickTranslate = QuickTranslatePanel()
 
         // Selection UI is the persistent right-edge floating bar; its Translate
