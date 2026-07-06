@@ -120,11 +120,6 @@ final class QuickTranslatePanel {
         // like Claude Code. Degrade to a safe Copy; the user pastes it deliberately.
         if SelectionReplacer.isTerminal(target) {
             replacer.copyToClipboard(text)
-            // iTerm2: try the Python-API helper to edit the input line in place
-            // (logs real cursor/selection/wrap data for tuning). Copy is the net.
-            if SelectionReplacer.isITerm2(target) {
-                replacer.runITerm2Helper(original: model.sourceText, improved: text)
-            }
             closeImmediately()
             return
         }
@@ -461,8 +456,10 @@ final class QuickTranslateModel: ObservableObject {
     }
 
     /// Find `fragment` in `ns` at/after `start`, tolerant of whitespace: tries an
-    /// exact forward match, then exact anywhere, then a regex that lets any run of
-    /// whitespace in the fragment match any whitespace (incl. newlines) in the text.
+    /// exact forward match, then a regex that lets any run of whitespace in the
+    /// fragment match any whitespace (incl. newlines) in the text. Both searches are
+    /// confined to the forward `scope`, so a fragment that repeats in the source is
+    /// disambiguated by the caller's walk order and never mis-tints an earlier copy.
     static func flexibleRange(of fragment: String, in ns: NSString, from start: Int) -> NSRange {
         let trimmed = fragment.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return NSRange(location: NSNotFound, length: 0) }
@@ -470,8 +467,6 @@ final class QuickTranslateModel: ObservableObject {
         let scope = NSRange(location: start, length: max(0, ns.length - start))
         let exact = ns.range(of: fragment, options: [], range: scope)
         if exact.location != NSNotFound { return exact }
-        let anywhere = ns.range(of: fragment)
-        if anywhere.location != NSNotFound { return anywhere }
 
         let tokens = trimmed.split(whereSeparator: { $0.isWhitespace })
         let pattern = tokens.map { NSRegularExpression.escapedPattern(for: String($0)) }.joined(separator: "\\s+")
@@ -479,8 +474,6 @@ final class QuickTranslateModel: ObservableObject {
             return NSRange(location: NSNotFound, length: 0)
         }
         if let m = regex.firstMatch(in: ns as String, range: scope) { return m.range }
-        let full = NSRange(location: 0, length: ns.length)
-        if let m = regex.firstMatch(in: ns as String, range: full) { return m.range }
         return NSRange(location: NSNotFound, length: 0)
     }
 

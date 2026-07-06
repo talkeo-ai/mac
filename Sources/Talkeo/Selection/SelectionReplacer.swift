@@ -64,38 +64,6 @@ final class SelectionReplacer {
         return terminalBundleIDs.contains(id)
     }
 
-    /// iTerm2 specifically — it exposes a Python API (cursor + selection coords +
-    /// per-line wrap info) that lets us edit the input line in place, unlike the
-    /// AppKit Accessibility buffer. Other terminals stay on Copy.
-    static func isITerm2(_ app: NSRunningApplication?) -> Bool {
-        app?.bundleIdentifier?.lowercased() == "com.googlecode.iterm2"
-    }
-
-    /// The iTerm2 Python API helper (its own venv) and script. Absolute paths
-    /// (dev/personal); when absent, the caller just falls back to Copy.
-    private static let helperPython =
-        "/Users/joaquintrabajo/dev/talkeo-os/repos/mac/scripts/iterm-venv/bin/python3"
-    private static let helperScript =
-        "/Users/joaquintrabajo/dev/talkeo-os/repos/mac/scripts/iterm_replace.py"
-
-    /// Run the iTerm2 helper (off-main) to replace the selection on the input
-    /// line. Best-effort: requires iTerm2's Python API enabled; logs to
-    /// /tmp/talkeo_iterm.log. The app copies the improved text too as a safety net.
-    func runITerm2Helper(original: String, improved: String) {
-        let py = SelectionReplacer.helperPython
-        let script = SelectionReplacer.helperScript
-        guard FileManager.default.isExecutableFile(atPath: py),
-              FileManager.default.fileExists(atPath: script)
-        else { return }
-        queue.async {
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: py)
-            proc.arguments = [script, original, improved]
-            try? proc.run()
-            proc.waitUntilExit()
-        }
-    }
-
     /// Put `text` on the clipboard for the user to paste themselves (no restore) —
     /// the safe Replace path for targets we can't edit in place (terminals).
     func copyToClipboard(_ text: String) {
@@ -144,6 +112,13 @@ final class SelectionReplacer {
         guard AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
               let focused
         else { SelectionReplacer.dbg("AX: no focused element"); return false }
+        // `focused` is an untyped CFTypeRef; a plain cast to AXUIElement can't fail
+        // at compile time but would silently reinterpret a wrong CF type, so verify
+        // the runtime type id first and bail to the clipboard fallback if it differs.
+        guard CFGetTypeID(focused) == AXUIElementGetTypeID() else {
+            SelectionReplacer.dbg("AX: focused element is not an AXUIElement")
+            return false
+        }
         // swiftlint:disable:next force_cast
         let element = focused as! AXUIElement
         AXUIElementSetMessagingTimeout(element, messagingTimeout)
@@ -189,6 +164,8 @@ final class SelectionReplacer {
         guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeValue) == .success,
               let rangeValue
         else { return false }
+        // Verify the CF type id before casting — see `accessibilityReplace`.
+        guard CFGetTypeID(rangeValue) == AXValueGetTypeID() else { return false }
         // swiftlint:disable:next force_cast
         let axRange = rangeValue as! AXValue
         var range = CFRange()
