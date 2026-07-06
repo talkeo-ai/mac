@@ -57,6 +57,11 @@ final class TTSAudioPlayer: NSObject, ObservableObject, @unchecked Sendable {
     func load(_ text: String, lang: String, rate: Float, fromFraction fraction: Double = 0) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
+        // Cancel any in-flight synthesis: a rapid re-load (e.g. tap Listen, then
+        // pick a word before the clip arrives) must not leave the previous fetch
+        // running — both would pass the `currentText == clean` guard and each
+        // `start()` a second `AVAudioPlayer`, restarting the audio audibly.
+        fetch?.cancel()
         teardown()
         currentText = clean
         self.rate = rate

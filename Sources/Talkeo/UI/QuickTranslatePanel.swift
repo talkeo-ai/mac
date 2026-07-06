@@ -137,6 +137,8 @@ final class QuickTranslatePanel {
     /// for ~140ms, so a fallback ⌘V could land here instead of the target app.
     private func closeImmediately() {
         removeDismissMonitor()
+        Speaker.stop() // never let playback outlive the popover
+        TTSAudioPlayer.shared.stop()
         panel.orderOut(nil)
         panel.alphaValue = 1
     }
