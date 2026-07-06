@@ -27,7 +27,8 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
 
 final class QuickTranslatePanel {
     private let panel: NSPanel
-    private let model = QuickTranslateModel()
+    private let model: QuickTranslateModel
+    private let replacer = SelectionReplacer()
     private var dismissMonitor: Any?
     private var topAnchor: CGFloat = 0
     private var leftAnchor: CGFloat = 0
@@ -56,12 +57,21 @@ final class QuickTranslatePanel {
         panel.backgroundColor = .clear
         panel.isOpaque = false
 
+        // Dev affordance: run with TALKEO_STUB_NETWORK set to drive the panel from
+        // canned data (build/visually test the UI before the endpoints exist).
+        let model = ProcessInfo.processInfo.environment["TALKEO_STUB_NETWORK"] != nil
+            ? QuickTranslateModel(client: QuickPreviewClient())
+            : QuickTranslateModel()
+        self.model = model
+
         var onResizeRef: ((CGSize) -> Void)?
         var onCloseRef: (() -> Void)?
+        var onReplaceRef: ((String) -> Void)?
         let view = QuickTranslateView(
             model: model,
             onResize: { onResizeRef?($0) },
-            onClose: { onCloseRef?() }
+            onClose: { onCloseRef?() },
+            onReplace: { onReplaceRef?($0) }
         )
         let hosting = FirstMouseHostingView(rootView: view)
         hosting.frame = NSRect(origin: .zero, size: NSSize(width: Self.width, height: Self.nominalHeight))
@@ -70,6 +80,7 @@ final class QuickTranslatePanel {
         self.panel = panel
         onResizeRef = { [weak self] size in self?.resize(to: size) }
         onCloseRef = { [weak self] in self?.hide() }
+        onReplaceRef = { [weak self] text in self?.performReplace(text) }
     }
 
     func show(text: String) {
@@ -82,10 +93,51 @@ final class QuickTranslatePanel {
         present()
     }
 
+    /// Improve tapped with text selected — rewrite it natively and show the diff.
+    /// `targetIsTerminal` flips Replace into a safe Copy (terminals can't be
+    /// edited in place).
+    func improve(text: String, targetIsTerminal: Bool = false) {
+        model.improve(text, targetIsTerminal: targetIsTerminal)
+        present()
+    }
+
     /// Translate tapped with nothing selected — show the local history list.
     func showHistory() {
         model.showHistory()
         present()
+    }
+
+    /// Apply the improved text in place. Capture the target app *before* closing
+    /// (our non-activating panel left it frontmost), order the panel out instantly
+    /// so it resigns key with no fade delay, then let the replacer do its thing
+    /// (AX write first, clipboard + ⌘V fallback).
+    private func performReplace(_ text: String) {
+        guard !text.isEmpty else { return }
+        let target = NSWorkspace.shared.frontmostApplication
+        // Terminals: the selection is copy-only and decoupled from the editable
+        // input, and AX exposes the whole scrollback (not a logical input line), so
+        // there's no sound way to edit the selection in place — especially in TUIs
+        // like Claude Code. Degrade to a safe Copy; the user pastes it deliberately.
+        if SelectionReplacer.isTerminal(target) {
+            replacer.copyToClipboard(text)
+            // iTerm2: try the Python-API helper to edit the input line in place
+            // (logs real cursor/selection/wrap data for tuning). Copy is the net.
+            if SelectionReplacer.isITerm2(target) {
+                replacer.runITerm2Helper(original: model.sourceText, improved: text)
+            }
+            closeImmediately()
+            return
+        }
+        closeImmediately()
+        replacer.replace(with: text, reactivating: target)
+    }
+
+    /// Order out now (no fade): the fade-out animation would keep the panel key
+    /// for ~140ms, so a fallback ⌘V could land here instead of the target app.
+    private func closeImmediately() {
+        removeDismissMonitor()
+        panel.orderOut(nil)
+        panel.alphaValue = 1
     }
 
     private func present() {
@@ -176,10 +228,23 @@ final class QuickTranslateModel: ObservableObject {
     @Published var cardErrors: [String: String] = [:]
 
     /// Translate view vs. the local history list (shown when Translate is tapped
-    /// with nothing selected).
-    enum Mode { case translate, history }
+    /// with nothing selected) vs. the improve view (native rewrite + diff).
+    enum Mode { case translate, history, improve }
     @Published var mode: Mode = .translate
     @Published var historyEntries: [HistoryEntry] = []
+
+    /// Improve (talkeo-ai/mac#5): the structured rewrite, its own lifecycle phase
+    /// (kept separate from translate's `phase`), and the changes the user has
+    /// dismissed so their row and source highlight clear.
+    @Published var improveResult: ImproveResult?
+    @Published var improvePhase: Phase = .idle
+    @Published var dismissedChangeIDs: Set<UUID> = []
+    /// Which correction is shown — one at a time, paged with ‹ › like the
+    /// translation's explain card. Index into `activeChanges`.
+    @Published var activeChangeIndex: Int = 0
+    /// True when the text came from a terminal (select-to-copy, not editable), so
+    /// Replace degrades to a safe Copy instead of editing in place.
+    @Published var targetIsTerminal: Bool = false
 
     /// When true the detected (source) box is an editable input: typing changes
     /// the text and selecting does not mark terms; confirming re-translates.
@@ -296,6 +361,128 @@ final class QuickTranslateModel: ObservableObject {
     }
 
     func retry() { translate(sourceText) }
+
+    // MARK: Improve (native/natural rewrite)
+
+    /// Rewrite `text` into more native English and load the structured changes.
+    /// One short JSON call (not a stream), mirroring `translate(_:)`'s structure.
+    func improve(_ text: String, targetIsTerminal: Bool = false) {
+        task?.cancel()
+        clearSelection()
+        mode = .improve
+        sourceEditing = false
+        self.targetIsTerminal = targetIsTerminal
+        sourceText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        improveResult = nil
+        dismissedChangeIDs = []
+        activeChangeIndex = 0
+
+        // Improve always rewrites English; detection picks the explanation
+        // language (the user's own — the other of the EN/ES pair).
+        detectedLang = QuickTranslateModel.detectLanguage(sourceText)
+        translateLang = detectedLang == "EN" ? "ES" : "EN"
+
+        guard !sourceText.isEmpty else { improvePhase = .idle; return }
+        improvePhase = .streaming
+
+        let explainLang = translateLang
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await self.client.improve(text: self.sourceText, targetLang: explainLang)
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    self.improveResult = result
+                    self.improvePhase = .done
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.improvePhase = .failed(QuickTranslateModel.message(error))
+            }
+        }
+    }
+
+    func retryImprove() { improve(sourceText) }
+
+    /// Changes the user hasn't dismissed — the set the pager moves through.
+    var activeChanges: [ImproveResult.Change] {
+        (improveResult?.changes ?? []).filter { !dismissedChangeIDs.contains($0.id) }
+    }
+
+    /// The single correction currently shown (paged), clamped to the live set.
+    var activeChange: ImproveResult.Change? {
+        let changes = activeChanges
+        guard !changes.isEmpty else { return nil }
+        return changes[min(max(activeChangeIndex, 0), changes.count - 1)]
+    }
+
+    /// True once the result arrived with no corrections at all (the trust-critical
+    /// "already natural" case) — distinct from the user dismissing every one.
+    var improveAlreadyNatural: Bool {
+        guard let result = improveResult else { return false }
+        return result.changes.isEmpty
+    }
+
+    /// Page between corrections (wraps, like the explain card's ‹ › pager).
+    func stepChange(by delta: Int) {
+        let count = activeChanges.count
+        guard count > 0 else { return }
+        activeChangeIndex = (activeChangeIndex + delta + count) % count
+    }
+
+    /// Reject a correction: it leaves the pager and its source highlight clears
+    /// (the `improved` text is unchanged — Replace still applies the full rewrite).
+    func dismissChange(_ id: UUID) {
+        withAnimation(.easeOut(duration: 0.18)) {
+            _ = dismissedChangeIDs.insert(id)
+            let count = activeChanges.count
+            if activeChangeIndex >= count { activeChangeIndex = max(0, count - 1) }
+        }
+    }
+
+    /// Ranges of every active correction's `original` within `sourceText`, so the
+    /// original pane marks all the changed words from the start; the currently-
+    /// paged one is emphasized and the rest are dimmed. Walks corrections in order
+    /// to disambiguate a fragment that repeats, and tolerates whitespace
+    /// differences — the backend normalizes spaces/newlines, so an exact substring
+    /// match would miss fragments that span line breaks.
+    func improveHighlights() -> [(range: NSRange, active: Bool)] {
+        let activeID = activeChange?.id
+        let ns = sourceText as NSString
+        var result: [(range: NSRange, active: Bool)] = []
+        var cursor = 0
+        for change in activeChanges {
+            let found = QuickTranslateModel.flexibleRange(of: change.original, in: ns, from: cursor)
+            guard found.location != NSNotFound else { continue }
+            result.append((found, change.id == activeID))
+            cursor = NSMaxRange(found)
+        }
+        return result
+    }
+
+    /// Find `fragment` in `ns` at/after `start`, tolerant of whitespace: tries an
+    /// exact forward match, then exact anywhere, then a regex that lets any run of
+    /// whitespace in the fragment match any whitespace (incl. newlines) in the text.
+    static func flexibleRange(of fragment: String, in ns: NSString, from start: Int) -> NSRange {
+        let trimmed = fragment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return NSRange(location: NSNotFound, length: 0) }
+
+        let scope = NSRange(location: start, length: max(0, ns.length - start))
+        let exact = ns.range(of: fragment, options: [], range: scope)
+        if exact.location != NSNotFound { return exact }
+        let anywhere = ns.range(of: fragment)
+        if anywhere.location != NSNotFound { return anywhere }
+
+        let tokens = trimmed.split(whereSeparator: { $0.isWhitespace })
+        let pattern = tokens.map { NSRegularExpression.escapedPattern(for: String($0)) }.joined(separator: "\\s+")
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return NSRange(location: NSNotFound, length: 0)
+        }
+        if let m = regex.firstMatch(in: ns as String, range: scope) { return m.range }
+        let full = NSRange(location: 0, length: ns.length)
+        if let m = regex.firstMatch(in: ns as String, range: full) { return m.range }
+        return NSRange(location: NSNotFound, length: 0)
+    }
 
     // MARK: History
 
@@ -499,13 +686,26 @@ struct QuickTranslateView: View {
     @ObservedObject var model: QuickTranslateModel
     let onResize: (CGSize) -> Void
     let onClose: () -> Void
+    /// Apply the improved text in place (Improve's Replace action).
+    var onReplace: (String) -> Void = { _ in }
     @State private var sourceHeight: CGFloat = 22
     @State private var targetHeight: CGFloat = 22
+    /// Measured natural height of the improve correction card, so it scrolls
+    /// internally past a cap instead of growing the popover off-screen.
+    @State private var cardHeight: CGFloat = 120
+
+    /// Red tint marking the changed fragments in the original (Improve). Clearly
+    /// visible for the currently-paged correction; `drawMarkers` dims the rest.
+    private static let diffColor = NSColor.systemRed.withAlphaComponent(0.32)
+    /// Cap for the correction card; taller (sentence-level) corrections scroll.
+    private static let cardMaxHeight: CGFloat = 168
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if model.mode == .history {
                 historyView
+            } else if model.mode == .improve {
+                improveView
             } else if let term = model.activeTerm {
                 // One box: the pane the term was picked from (with its highlight),
                 // then the card. The other box is hidden.
@@ -725,6 +925,302 @@ struct QuickTranslateView: View {
                 .frame(maxHeight: 340)
             }
         }
+    }
+
+    // MARK: Improve (native rewrite + compact, scannable changes)
+
+    @ViewBuilder
+    private var improveView: some View {
+        // Original, with the changed fragments tinted red (the diff).
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                cardLabel("Original")
+                Spacer()
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Palette.muted)
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .handCursor()
+            }
+            improvePaneText(
+                model.sourceText,
+                height: $sourceHeight,
+                highlights: model.improveHighlights(),
+                highlightColor: QuickTranslateView.diffColor
+            )
+        }
+
+        if model.improvePhase == .streaming {
+            Divider().overlay(Palette.border).opacity(0.6)
+            improveLoading
+        } else if case let .failed(message) = model.improvePhase {
+            Divider().overlay(Palette.border).opacity(0.6)
+            improveError(message)
+        } else if let result = model.improveResult {
+            Divider().overlay(Palette.border).opacity(0.6)
+
+            // Improved, with Listen (always English) + copy.
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    cardLabel("Improved")
+                    Spacer()
+                    QuickIconButton(system: "speaker.wave.2") { Speaker.speak(result.improved, lang: "EN") }
+                    QuickIconButton(system: "doc.on.doc") {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(result.improved, forType: .string)
+                    }
+                }
+                improvePaneText(result.improved, height: $targetHeight, highlights: [], highlightColor: nil)
+            }
+
+            if model.improveAlreadyNatural {
+                alreadyNatural
+            } else {
+                let changes = model.activeChanges
+                if let active = model.activeChange {
+                    Divider().overlay(Palette.border).opacity(0.6)
+                    ScrollView(.vertical, showsIndicators: true) {
+                        changeCard(active, index: min(model.activeChangeIndex, changes.count - 1), total: changes.count)
+                            .background(
+                                GeometryReader { geo in
+                                    Color.clear.preference(key: ImproveCardHeightKey.self, value: geo.size.height)
+                                }
+                            )
+                    }
+                    .frame(height: min(max(cardHeight, 1), QuickTranslateView.cardMaxHeight))
+                    .onPreferenceChange(ImproveCardHeightKey.self) { cardHeight = $0 }
+                } else {
+                    Divider().overlay(Palette.border).opacity(0.6)
+                    allDismissedNote
+                }
+            }
+
+            replaceBar(result.improved)
+        }
+    }
+
+    @ViewBuilder
+    private func improvePaneText(
+        _ text: String,
+        height: Binding<CGFloat>,
+        highlights: [(range: NSRange, active: Bool)],
+        highlightColor: NSColor?
+    ) -> some View {
+        SelectableText(
+            text: text,
+            height: height,
+            width: QuickTranslateView.width - 32,
+            // Keep the panes compact — Improve is a quick glance, not a reader.
+            // Long text scrolls inside the box so the correction card stays visible.
+            maxHeight: 116,
+            highlights: highlights,
+            highlightColor: highlightColor,
+            isEditable: false,
+            onTextChange: { _ in },
+            onCommit: {}
+        ) { _, _ in }
+            .frame(height: height.wrappedValue)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// One correction at a time: `original → fixed`, a ‹ › pager when there are
+    /// several, a brief why, examples only when the backend sent them, and a
+    /// dismiss that pages on to the next.
+    private func changeCard(_ change: ImproveResult.Change, index: Int, total: Int) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 8) {
+                (Text(change.original)
+                    .font(.system(size: 14.5))
+                    .strikethrough(color: Palette.tertiary)
+                    .foregroundColor(Palette.muted)
+                 + Text("  →  ")
+                    .font(.system(size: 14.5))
+                    .foregroundColor(Palette.tertiary)
+                 + Text(change.fixed)
+                    .font(.system(size: 14.5, weight: .medium))
+                    .foregroundColor(Palette.foreground))
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+                if total > 1 { changePager(index: index, total: total) }
+                QuickIconButton(system: "xmark") { model.dismissChange(change.id) }
+            }
+            if !change.why.isEmpty {
+                Text(change.why)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Palette.muted)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let examples = change.examples, !examples.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(examples.indices, id: \.self) { i in
+                        let ex = examples[i]
+                        HStack(alignment: .top, spacing: 6) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                markdownBold(ex.source)
+                                    .font(.system(size: 13.5))
+                                    .foregroundStyle(Palette.foreground)
+                                    .lineSpacing(3)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                markdownBold(ex.target)
+                                    .font(.system(size: 12.5))
+                                    .foregroundStyle(Palette.muted)
+                                    .lineSpacing(3)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 4)
+                            speakerButton(QuickTranslateView.plain(ex.source))
+                        }
+                    }
+                }
+                .padding(.top, 2)
+            }
+        }
+        .padding(.vertical, 9)
+        .padding(.horizontal, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Palette.elevated.opacity(0.45))
+        )
+    }
+
+    /// ‹ 1/2 › pager for stepping through corrections, mirroring the explain card.
+    private func changePager(index: Int, total: Int) -> some View {
+        HStack(spacing: 8) {
+            Button(action: { model.stepChange(by: -1) }) {
+                Image(systemName: "chevron.left").font(.system(size: 11, weight: .bold))
+            }
+            .buttonStyle(.plain)
+            Text("\(index + 1) / \(total)")
+                .font(.system(size: 11, weight: .medium))
+                .monospacedDigit()
+            Button(action: { model.stepChange(by: 1) }) {
+                Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold))
+            }
+            .buttonStyle(.plain)
+        }
+        .foregroundStyle(Palette.muted)
+        .padding(.top, 1)
+        .handCursor()
+    }
+
+    private var alreadyNatural: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.seal.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(Color.green.opacity(0.8))
+            Text("Already natural — no changes needed.")
+                .font(.system(size: 13))
+                .foregroundStyle(Palette.muted)
+        }
+    }
+
+    /// Shown when the user has dismissed every correction (distinct from the
+    /// backend returning none).
+    private var allDismissedNote: some View {
+        Text("All suggestions dismissed.")
+            .font(.system(size: 13))
+            .foregroundStyle(Palette.tertiary)
+    }
+
+    private func replaceBar(_ improved: String) -> some View {
+        let terminal = model.targetIsTerminal
+        return VStack(alignment: .leading, spacing: 7) {
+            if terminal {
+                // Terminals can't be edited in place (copy-only selection); be
+                // honest — Replace copies and the user pastes where they mean to.
+                Text("Terminal: can't replace in place. This copies the improved text — paste it (⌘V) where you want it.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.tertiary)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                Button(action: { onReplace(improved) }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: terminal ? "doc.on.clipboard" : "arrow.down.doc")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(terminal ? "Copy" : "Replace").font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(Capsule().fill(Color.accentColor))
+                }
+                .buttonStyle(.plain)
+                .help(terminal ? "Copy the improved text to paste it yourself" : "Replace the selection with the improved text")
+                .handCursor()
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private var improveLoading: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Improving…")
+                .font(.system(size: 12.5))
+                .foregroundStyle(Palette.tertiary)
+            shimmerBar(width: 220, height: 12)
+            shimmerBar(width: 180, height: 12)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func improveError(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(message)
+                .font(.system(size: 12))
+                .foregroundStyle(Palette.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(action: { model.retryImprove() }) {
+                Text("Retry")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Palette.foreground)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Palette.elevated))
+            }
+            .buttonStyle(.plain)
+            .handCursor()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Small speaker that reads English aloud (shared by the improve changes).
+    private func speakerButton(_ english: String) -> some View {
+        Button {
+            Speaker.speak(english, lang: "EN")
+        } label: {
+            Image(systemName: "speaker.wave.2")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Palette.muted)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Listen")
+        .handCursor()
+    }
+
+    /// Render markdown so the backend's `**term**` shows in bold.
+    private func markdownBold(_ string: String) -> Text {
+        if let attributed = try? AttributedString(markdown: string) {
+            return Text(attributed)
+        }
+        return Text(string)
+    }
+
+    /// Strip markdown bold markers so spoken text is clean.
+    private static func plain(_ string: String) -> String {
+        string.replacingOccurrences(of: "**", with: "")
     }
 
     // MARK: Vocab card (highlight-to-explain, with ‹ › pager)
@@ -1005,6 +1501,9 @@ private struct SelectableText: NSViewRepresentable {
     var maxHeight: CGFloat = .greatestFiniteMagnitude
     /// Persistent markers for the words already picked, and which one is focused.
     var highlights: [(range: NSRange, active: Bool)] = []
+    /// Override the marker fill (e.g. a red diff tint for Improve). Defaults to
+    /// the monochrome pick marker when nil.
+    var highlightColor: NSColor? = nil
     /// When true the view is an editable input (no marking); Enter commits.
     var isEditable: Bool = false
     var onTextChange: (String) -> Void = { _ in }
@@ -1102,6 +1601,7 @@ private struct SelectableText: NSViewRepresentable {
         // Markers only in read mode (editing invalidates ranges).
         let length = (textView.string as NSString).length
         textView.markers = isEditable ? [] : highlights.filter { NSMaxRange($0.range) <= length }
+        textView.markerColor = highlightColor
         textView.needsDisplay = true
 
         // Deterministic content height (text + width), capped — past the cap the
@@ -1164,6 +1664,8 @@ private final class WordSelectingTextView: NSTextView {
     var onSettled: (() -> Void)?
     /// Picked word ranges to draw (range, isFocused).
     var markers: [(range: NSRange, active: Bool)] = []
+    /// Optional override fill for the markers (Improve's diff tint).
+    var markerColor: NSColor?
 
     /// Register a selection on the first click even when the panel isn't key.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -1184,7 +1686,14 @@ private final class WordSelectingTextView: NSTextView {
                 in: tc
             ) { rect, _ in
                 let frame = rect.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: -3, dy: 0)
-                Palette.marker(active: marker.active).setFill()
+                let fill: NSColor
+                if let tint = self.markerColor {
+                    // Diff tint: emphasize the paged fragment, keep the rest visible.
+                    fill = marker.active ? tint : tint.withAlphaComponent(tint.alphaComponent * 0.5)
+                } else {
+                    fill = Palette.marker(active: marker.active)
+                }
+                fill.setFill()
                 NSBezierPath(roundedRect: frame, xRadius: 6, yRadius: 6).fill()
             }
         }
@@ -1328,6 +1837,16 @@ private struct QuickSizeKey: PreferenceKey {
     }
 }
 
+/// Natural (uncapped) height of the improve correction card, reported up so the
+/// surrounding scroll view can size to content up to its cap.
+private struct ImproveCardHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > value { value = next }
+    }
+}
+
 /// Native vibrancy backing for the popover's frosted surface.
 private struct QuickVisualEffectView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
@@ -1349,6 +1868,31 @@ private struct QuickPreviewClient: TransformClient {
             c.finish()
         }
     }
+
+    func improve(text: String, targetLang: String) async throws -> ImproveResult {
+        try? await Task.sleep(nanoseconds: 450_000_000)
+        return ImproveResult(
+            improved: "I'm about to work out, but the thing is, I didn't get to finish these improvements.",
+            changes: [
+                ImproveResult.Change(
+                    original: "train",
+                    fixed: "work out",
+                    why: "“Train” sounds like sports practice; for the gym, natives say “work out.”",
+                    type: "naturalness",
+                    examples: [
+                        ExplainCard.Example(source: "I **work out** every morning.", target: "Hago ejercicio cada mañana."),
+                    ]
+                ),
+                ImproveResult.Change(
+                    original: "this improvements",
+                    fixed: "these improvements",
+                    why: "“Improvements” is plural, so it takes “these.”",
+                    type: "grammar",
+                    examples: nil
+                ),
+            ]
+        )
+    }
 }
 
 #Preview("Quick translate") {
@@ -1360,5 +1904,14 @@ private struct QuickPreviewClient: TransformClient {
             model.targetText = "El comité alcanzó un acuerdo tentativo tras una deliberación exhaustiva."
             model.revealed = true
             model.phase = .done
+        }
+}
+
+#Preview("Improve") {
+    let model = QuickTranslateModel(client: QuickPreviewClient())
+    return QuickTranslateView(model: model, onResize: { _ in }, onClose: {}, onReplace: { _ in })
+        .padding(40)
+        .onAppear {
+            model.improve("I'm about to train, but it happens that I didn't get to finish this improvements.")
         }
 }

@@ -21,6 +21,16 @@ protocol TransformClient {
         sourceLang: String?,
         targetLang: String
     ) async throws -> ExplainCard
+
+    /// Improve: a more native/natural rewrite of the user's English plus the
+    /// individual changes (talkeo-ai/talkeo#8). A short structured JSON response
+    /// for the common short-text case. `targetLang` is the language to explain in
+    /// (the user's own — the `why` and each example's target side use it); the
+    /// rewrite itself is always English. Throws `TalkeoError` on failure.
+    func improve(
+        text: String,
+        targetLang: String
+    ) async throws -> ImproveResult
 }
 
 extension TransformClient {
@@ -33,6 +43,10 @@ extension TransformClient {
         targetLang: String
     ) async throws -> ExplainCard {
         throw TalkeoError.transport("explainCard not implemented")
+    }
+
+    func improve(text: String, targetLang: String) async throws -> ImproveResult {
+        throw TalkeoError.transport("improve not implemented")
     }
 }
 
@@ -76,11 +90,26 @@ struct TalkeoTransformClient: TransformClient {
             "target_lang": targetLang,
         ]
         if let sourceLang { body["source_lang"] = sourceLang }
+        return try await postJSON(path: "/api/v1/transform/explain", body: body)
+    }
 
+    func improve(text: String, targetLang: String) async throws -> ImproveResult {
+        // The rewrite is English → better English; `target_lang` is the language
+        // the explanations come back in (the user's own).
+        return try await postJSON(
+            path: "/api/v1/transform/improve",
+            body: ["text": text, "target_lang": targetLang]
+        )
+    }
+
+    /// Shared request/response handling for the short structured-JSON endpoints
+    /// (explain, improve): build the POST, map HTTP errors to `TalkeoError`, and
+    /// decode the typed payload.
+    private func postJSON<Response: Decodable>(path: String, body: [String: String]) async throws -> Response {
         guard let data = try? JSONSerialization.data(withJSONObject: body) else {
             throw TalkeoError.transport("invalid request")
         }
-        var request = URLRequest(url: config.baseURL.appendingPathComponent("/api/v1/transform/explain"))
+        var request = URLRequest(url: config.baseURL.appendingPathComponent(path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -104,7 +133,7 @@ struct TalkeoTransformClient: TransformClient {
             throw TalkeoError.http(status: http.statusCode, code: "http_error", message: "Request failed.")
         }
         do {
-            return try JSONDecoder().decode(ExplainCard.self, from: payload)
+            return try JSONDecoder().decode(Response.self, from: payload)
         } catch {
             throw TalkeoError.transport("Couldn't read the response.")
         }
