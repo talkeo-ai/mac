@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         floatingBar = FloatingBarPanel()
         floatingBar.onTranslate = { [weak self] in self?.translateCurrentSelection() }
         floatingBar.onImprove = { [weak self] in self?.improveCurrentSelection() }
+        floatingBar.onListen = { [weak self] in self?.listenCurrentSelection() }
         floatingBar.show()
 
         statusBar = StatusBarController(
@@ -108,6 +109,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 self.quickTranslate.improve(text: text, targetIsTerminal: isTerminal)
+            }
+        }
+    }
+
+    /// Reads the selection in the frontmost app and, if any, opens the listen
+    /// (TTS) popover. Listen needs text, so with nothing selected it's a no-op.
+    private func listenCurrentSelection() {
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier {
+            return
+        }
+        reader.readSelectedText { [weak self] text in
+            guard let self else { return }
+            if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                self.quickTranslate.listen(text: text)
             }
         }
     }

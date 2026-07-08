@@ -23,6 +23,10 @@ final class FloatingBarPanel {
     /// and opens the improve panel.
     var onImprove: (() -> Void)?
 
+    /// Invoked when the user taps Listen. The owner reads the current selection
+    /// and opens the listen (TTS) panel.
+    var onListen: (() -> Void)?
+
     /// Panel size, derived from the SwiftUI content's fitting size so the window
     /// hugs the pill exactly (no vertical slack that could shift centering). The
     /// content carries symmetric padding for the shadow, included here.
@@ -63,10 +67,12 @@ final class FloatingBarPanel {
 
         var onTranslateRef: (() -> Void)?
         var onImproveRef: (() -> Void)?
+        var onListenRef: (() -> Void)?
         let view = FloatingBarView(
             model: model,
             onTranslate: { onTranslateRef?() },
-            onImprove: { onImproveRef?() }
+            onImprove: { onImproveRef?() },
+            onListen: { onListenRef?() }
         )
         let hosting = NSHostingView(rootView: view)
         hosting.layoutSubtreeIfNeeded()
@@ -96,6 +102,7 @@ final class FloatingBarPanel {
 
         onTranslateRef = { [weak self] in self?.onTranslate?() }
         onImproveRef = { [weak self] in self?.onImprove?() }
+        onListenRef = { [weak self] in self?.onListen?() }
         installCursorMonitor()
     }
 
@@ -290,6 +297,7 @@ struct FloatingBarView: View {
     @ObservedObject var model: FloatingBarModel
     var onTranslate: () -> Void = {}
     var onImprove: () -> Void = {}
+    var onListen: () -> Void = {}
 
     private var stack: some View {
         VStack(spacing: 5) {
@@ -297,13 +305,16 @@ struct FloatingBarView: View {
                 .frame(width: 20, height: 20)
                 .padding(.bottom, 1)
 
-            // Translate and Improve both act on the selection, so both light up
-            // when there's text to work with. Capture (OCR) doesn't depend on it.
+            // Translate, Improve and Listen all act on the selection, so they light
+            // up when there's text to work with. Capture (OCR) doesn't depend on it.
             BarButton(system: "character.bubble", help: "Translate selection", isActive: model.hasSelection) {
                 onTranslate()
             }
             BarButton(system: "wand.and.stars", help: "Improve copy", isActive: model.hasSelection) {
                 onImprove()
+            }
+            BarButton(system: "speaker.wave.2", help: "Listen", isActive: model.hasSelection) {
+                onListen()
             }
             BarButton(system: "camera.viewfinder", help: "Capture text") {
                 // TODO: screenshot + Vision OCR
