@@ -353,7 +353,7 @@ final class QuickTranslateModel: ObservableObject {
         self.history = history
     }
 
-    func translate(_ text: String) {
+    func translate(_ text: String, detectedLangOverride: String? = nil) {
         task?.cancel()
         clearSelection()
         mode = .translate
@@ -362,8 +362,10 @@ final class QuickTranslateModel: ObservableObject {
         targetText = ""
         revealed = false
 
-        // Detect EN/ES and translate to the other (only those two are supported).
-        detectedLang = QuickTranslateModel.detectLanguage(sourceText)
+        // Detect EN/ES and translate to the other (only those two are supported),
+        // unless the caller already knows the direction (a manual swap, or retry
+        // preserving a prior correction).
+        detectedLang = detectedLangOverride ?? QuickTranslateModel.detectLanguage(sourceText)
         translateLang = detectedLang == "EN" ? "ES" : "EN"
 
         guard !sourceText.isEmpty else { phase = .idle; return }
@@ -388,7 +390,16 @@ final class QuickTranslateModel: ObservableObject {
         }
     }
 
-    func retry() { translate(sourceText) }
+    func retry() { translate(sourceText, detectedLangOverride: detectedLang) }
+
+    /// Auto-detection guessed wrong (easy on short/ambiguous text) — the user
+    /// tapped the swap control to correct it. Only EN/ES are supported, so
+    /// flipping which one the source is tagged as fully determines the new
+    /// direction; re-translates with it.
+    func swapLanguages() {
+        guard !sourceText.isEmpty, phase != .streaming else { return }
+        translate(sourceText, detectedLangOverride: translateLang)
+    }
 
     // MARK: Listen (TTS playback + select-to-hear)
 
@@ -810,7 +821,7 @@ struct QuickTranslateView: View {
                 // While editing the source, only the input shows.
                 paneView(.source, withClose: true, height: $sourceHeight)
                 if !model.sourceEditing {
-                    Divider().overlay(Palette.border).opacity(0.6)
+                    languageSwapDivider
                     paneView(.target, withClose: false, height: $targetHeight)
                 }
             }
@@ -922,6 +933,32 @@ struct QuickTranslateView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(Palette.tertiary)
                 }
+            }
+        }
+    }
+
+    /// Sits between the two panes: the plain divider plus a swap control for
+    /// when auto-detection guesses the wrong language (easy on short or
+    /// ambiguous text) — tapping it corrects the direction and re-translates.
+    private var languageSwapDivider: some View {
+        ZStack {
+            Divider().overlay(Palette.border).opacity(0.6)
+            HStack {
+                Spacer()
+                Button(action: { model.swapLanguages() }) {
+                    Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Palette.muted)
+                        .frame(width: 18, height: 18)
+                        .background(Circle().fill(Palette.elevated))
+                        .overlay(Circle().stroke(Palette.border, lineWidth: 1))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(model.sourceText.isEmpty || model.phase == .streaming)
+                .help("Wrong language detected? Swap EN ⇄ ES")
+                .handCursor()
+                Spacer()
             }
         }
     }
