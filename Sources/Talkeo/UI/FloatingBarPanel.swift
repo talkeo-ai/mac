@@ -55,6 +55,16 @@ final class FloatingBarPanel {
     private var pollTimer: Timer?
     private var slideTimer: Timer?
     private var cursorMonitors: [Any] = []
+    /// Ticks while the cursor sits over the bar, repeatedly reasserting the
+    /// pointing-hand. A single override per mouse-moved event isn't enough: the
+    /// app behind (e.g. a terminal) likely reasserts its own cursor the same
+    /// cross-process way we do ours (there's no supported API to make a
+    /// non-activating panel win AppKit's normal cursor-rect arbitration), so
+    /// which one lands last for a given event is a genuine, unavoidable race.
+    /// Re-asserting on a tight timer for as long as we're hovered means any
+    /// single loss self-corrects within a frame instead of sticking.
+    private var cursorReassertTimer: Timer?
+    private static let cursorReassertInterval: TimeInterval = 1.0 / 120.0
     /// The screen the bar is pinned to. Cached so it never flips to an adjacent
     /// display when auto-hide slides the panel partly off the edge.
     private var homeScreen: NSScreen?
@@ -108,10 +118,12 @@ final class FloatingBarPanel {
 
     deinit { removeCursorMonitor() }
 
-    /// SwiftUI's `onContinuousHover` sets the cursor, but a non-key panel loses
-    /// the race: the key app behind (e.g. Terminal) reasserts its I-beam on every
-    /// mouse move. So we watch mouse-moves ourselves — running *after* that app —
-    /// and force the pointing-hand whenever the cursor is over the visible bar.
+    /// SwiftUI's `onContinuousHover` doesn't reliably set the cursor on a
+    /// non-key, non-activating panel, so we watch mouse-moves ourselves and
+    /// force the pointing-hand whenever the cursor is over the visible bar.
+    /// This alone still races the app behind (e.g. a terminal keeping its own
+    /// I-beam live so it reads correctly while inactive) — see
+    /// `cursorReassertTimer` for how that race gets closed.
     private func installCursorMonitor() {
         removeCursorMonitor()
         let global = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
@@ -127,11 +139,33 @@ final class FloatingBarPanel {
     private func removeCursorMonitor() {
         cursorMonitors.forEach { NSEvent.removeMonitor($0) }
         cursorMonitors = []
+        stopCursorReassertTimer()
     }
 
     private func updateCursorOverBar() {
-        guard panel.isVisible, panel.frame.contains(NSEvent.mouseLocation) else { return }
+        guard panel.isVisible, panel.frame.contains(NSEvent.mouseLocation) else {
+            stopCursorReassertTimer()
+            return
+        }
         NSCursor.pointingHand.set()
+        startCursorReassertTimer()
+    }
+
+    private func startCursorReassertTimer() {
+        guard cursorReassertTimer == nil else { return }
+        cursorReassertTimer = Timer.scheduledTimer(withTimeInterval: Self.cursorReassertInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            guard self.panel.isVisible, self.panel.frame.contains(NSEvent.mouseLocation) else {
+                self.stopCursorReassertTimer()
+                return
+            }
+            NSCursor.pointingHand.set()
+        }
+    }
+
+    private func stopCursorReassertTimer() {
+        cursorReassertTimer?.invalidate()
+        cursorReassertTimer = nil
     }
 
     var isVisible: Bool { featureVisible }
@@ -161,6 +195,7 @@ final class FloatingBarPanel {
     func hide() {
         featureVisible = false
         stopTracking()
+        stopCursorReassertTimer()
         panel.orderOut(nil)
     }
 
