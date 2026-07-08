@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // reads the current selection on demand.
         floatingBar = FloatingBarPanel()
         floatingBar.onTranslate = { [weak self] in self?.translateCurrentSelection() }
+        floatingBar.onImprove = { [weak self] in self?.improveCurrentSelection() }
         floatingBar.show()
 
         statusBar = StatusBarController(
@@ -89,6 +90,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 // Nothing selected — open the local history instead.
                 self.quickTranslate.showHistory()
+            }
+        }
+    }
+
+    /// Reads the selection in the frontmost app and, if any, opens the improve
+    /// popover. Improve needs text, so with nothing selected it's a no-op.
+    private func improveCurrentSelection() {
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        if frontmost?.bundleIdentifier == Bundle.main.bundleIdentifier {
+            return
+        }
+        // Capture terminal-ness now (the frontmost app owns the selection); it
+        // turns Replace into a safe Copy since terminals can't be edited in place.
+        let isTerminal = SelectionReplacer.isTerminal(frontmost)
+        reader.readSelectedText { [weak self] text in
+            guard let self else { return }
+            if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                self.quickTranslate.improve(text: text, targetIsTerminal: isTerminal)
             }
         }
     }

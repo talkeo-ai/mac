@@ -9,9 +9,15 @@ final class MouseUpMonitor {
     private let onDeselect: (() -> Void)?
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var keyMonitor: Any?
+    private var pendingKeyWork: DispatchWorkItem?
     private var downLocation: CGPoint?
     private var didDrag: Bool = false
     private var started: Bool = false
+
+    /// Keys that extend a selection when Shift is held (arrows, Home/End,
+    /// PageUp/PageDown). Combined with Cmd they select by line/document.
+    private static let selectionNavKeys: Set<UInt16> = [123, 124, 125, 126, 115, 116, 119, 121]
 
     /// `onSelection` fires after a mouse-up that looks like it made a selection.
     /// `onDeselect` fires on a plain single click — the usual way a selection is
@@ -54,8 +60,43 @@ final class MouseUpMonitor {
 
         eventTap = tap
         runLoopSource = source
+
+        // Mouse-up alone misses keyboard selections (Cmd+A, Shift+arrows), so also
+        // watch key-downs in other apps. Global monitors don't see Talkeo's own
+        // keys, which is exactly what we want (selections live in the other app).
+        keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            self?.handleKey(event)
+        }
+
         started = true
         NSLog("[Talkeo] mouse monitor started")
+    }
+
+    /// Classify a key-down: a selection gesture re-reads the selection; ordinary
+    /// typing/navigation collapses it, so it clears the "has selection" state.
+    /// Debounced so holding Shift+arrow doesn't fire a read on every repeat.
+    private func handleKey(_ event: NSEvent) {
+        let flags = event.modifierFlags
+        let code = event.keyCode
+        let selectAll = flags.contains(.command) && code == 0 // Cmd+A
+        let shiftSelect = flags.contains(.shift) && Self.selectionNavKeys.contains(code)
+
+        if selectAll || shiftSelect {
+            scheduleKeySelection(selected: true)
+        } else if !flags.contains(.command) && !flags.contains(.control) && !flags.contains(.function) {
+            // A plain character / arrow / delete collapses the selection.
+            scheduleKeySelection(selected: false)
+        }
+    }
+
+    private func scheduleKeySelection(selected: Bool) {
+        pendingKeyWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if selected { self.onSelection() } else { self.onDeselect?() }
+        }
+        pendingKeyWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
     }
 
     /// Whether a mouse-up looks like it produced/changed a text selection.

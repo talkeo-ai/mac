@@ -19,6 +19,10 @@ final class FloatingBarPanel {
     /// selection and opens the translate panel.
     var onTranslate: (() -> Void)?
 
+    /// Invoked when the user taps Improve. The owner reads the current selection
+    /// and opens the improve panel.
+    var onImprove: (() -> Void)?
+
     /// Panel size, derived from the SwiftUI content's fitting size so the window
     /// hugs the pill exactly (no vertical slack that could shift centering). The
     /// content carries symmetric padding for the shadow, included here.
@@ -58,7 +62,12 @@ final class FloatingBarPanel {
         self.model = model
 
         var onTranslateRef: (() -> Void)?
-        let view = FloatingBarView(model: model, onTranslate: { onTranslateRef?() })
+        var onImproveRef: (() -> Void)?
+        let view = FloatingBarView(
+            model: model,
+            onTranslate: { onTranslateRef?() },
+            onImprove: { onImproveRef?() }
+        )
         let hosting = NSHostingView(rootView: view)
         hosting.layoutSubtreeIfNeeded()
         var fitting = hosting.fittingSize
@@ -86,6 +95,7 @@ final class FloatingBarPanel {
         self.panel = panel
 
         onTranslateRef = { [weak self] in self?.onTranslate?() }
+        onImproveRef = { [weak self] in self?.onImprove?() }
         installCursorMonitor()
     }
 
@@ -279,6 +289,7 @@ final class FloatingBarModel: ObservableObject {
 struct FloatingBarView: View {
     @ObservedObject var model: FloatingBarModel
     var onTranslate: () -> Void = {}
+    var onImprove: () -> Void = {}
 
     private var stack: some View {
         VStack(spacing: 5) {
@@ -292,7 +303,7 @@ struct FloatingBarView: View {
                 onTranslate()
             }
             BarButton(system: "wand.and.stars", help: "Improve copy", isActive: model.hasSelection) {
-                // TODO: Groq rewrite + replace-in-place
+                onImprove()
             }
             BarButton(system: "camera.viewfinder", help: "Capture text") {
                 // TODO: screenshot + Vision OCR
