@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mouseMonitor: MouseUpMonitor!
     private var quickTranslate: QuickTranslatePanel!
     private var floatingBar: FloatingBarPanel!
+    private var mainWindow: MainWindowController!
     private let reader = SelectionReader()
     private let permission = AccessibilityPermission()
 
@@ -13,9 +14,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // in the tree but stays disconnected for now.)
         quickTranslate = QuickTranslatePanel()
 
+        // The main app window: opened at launch (normal-app behavior), from the
+        // bar's brand button, and on Dock/Finder reopen.
+        mainWindow = MainWindowController()
+
         // Selection UI is the persistent right-edge floating bar; its Translate
         // reads the current selection on demand.
         floatingBar = FloatingBarPanel()
+        floatingBar.onOpenApp = { [weak self] in self?.mainWindow.show() }
         floatingBar.onTranslate = { [weak self] in self?.translateCurrentSelection() }
         floatingBar.onImprove = { [weak self] in self?.improveCurrentSelection() }
         floatingBar.onListen = { [weak self] in self?.listenCurrentSelection() }
@@ -45,6 +51,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             permission.requestIfNeeded()
             startMonitorWhenTrusted()
         }
+
+        mainWindow.show()
+    }
+
+    /// Reopening from the Finder or the Dock icon brings the main window back,
+    /// like a normal app.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        mainWindow.show()
+        return false
     }
 
     private func startMonitorWhenTrusted() {
