@@ -1,32 +1,26 @@
 import AppKit
 import SwiftUI
 
-/// Talkeo's main application window — the "open Talkeo like a normal app"
-/// surface, as opposed to the ambient selection UI (floating bar, popovers).
+/// Talkeo's main application window — the normal-app surface, as opposed to
+/// the ambient selection UI (floating bar, popovers).
 ///
-/// The app runs as an accessory (no Dock icon) so the ambient UI stays out of
-/// the way. Opening this window flips the activation policy to `.regular`
-/// (Dock icon + Cmd-Tab presence) and closing it flips back — the Dock
-/// presence tracks the window, the pattern menu-bar utilities use for their
-/// settings/main windows.
-final class MainWindowController: NSObject, NSWindowDelegate {
+/// Talkeo runs as a regular app (Dock icon, Cmd-Tab). Closing this window
+/// doesn't quit or hide the app: the ambient feature keeps running and the
+/// Dock icon stays, Discord-style — clicking it brings the window back.
+final class MainWindowController: NSObject {
     private var window: NSWindow?
 
-    /// Order the main window front, giving the app normal-app presence
-    /// (Dock icon, menu bar, Cmd-Tab) while it stays open.
-    func show() {
+    override init() {
+        super.init()
         installMainMenuIfNeeded()
-        NSApp.setActivationPolicy(.regular)
+    }
+
+    /// Order the main window front and focus the app.
+    func show() {
         let window = self.window ?? makeWindow()
         self.window = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        // Back to ambient mode: no Dock icon, the floating bar and status item
-        // remain the app's only presence.
-        NSApp.setActivationPolicy(.accessory)
     }
 
     private func makeWindow() -> NSWindow {
@@ -46,13 +40,12 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         window.contentViewController = NSHostingController(rootView: MainWindowView())
         window.setFrameAutosaveName("TalkeoMainWindow")
         window.center()
-        window.delegate = self
         return window
     }
 
-    /// The executable launches as an accessory, so no main menu exists until
-    /// the window first opens. Without one the window has no Cmd+W/Cmd+Q and
-    /// text fields lose the standard Edit shortcuts.
+    /// The executable builds its menu bar in code (no nib). Without one the
+    /// window has no Cmd+W/Cmd+Q and text fields lose the standard Edit
+    /// shortcuts.
     private func installMainMenuIfNeeded() {
         guard NSApp.mainMenu == nil else { return }
         let main = NSMenu()
