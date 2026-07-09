@@ -988,13 +988,15 @@ struct QuickTranslateView: View {
     private static let recentHistoryCount = 5
 
     /// This whole mode is the empty-selection entry point, not just a history
-    /// list — the compose input at the top is the primary thing (translate
-    /// something new), and the recent entries are secondary, below it. No
-    /// "History" page title: it would describe only the bottom half.
+    /// list — titled "Translate" (what the compose input actually does), with
+    /// the recent entries as a secondary "Recent" section below it.
     private var historyView: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                HistoryComposeInput(onSubmit: { model.translate($0) })
+            HStack(alignment: .center) {
+                Text("Translate")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Palette.foreground)
+                Spacer()
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .bold))
@@ -1006,6 +1008,8 @@ struct QuickTranslateView: View {
                 .buttonStyle(.plain)
                 .handCursor()
             }
+
+            HistoryComposeInput(onSubmit: { model.translate($0) })
 
             if !model.historyEntries.isEmpty {
                 Divider().overlay(Palette.border).opacity(0.5)
@@ -2030,14 +2034,14 @@ private struct HistoryComposeInput: View {
     var body: some View {
         ZStack(alignment: .leading) {
             if text.isEmpty {
-                Text("Type or paste text to translate, then press Return.")
+                Text("Type or paste text to translate…")
                     .font(.system(size: 15))
                     .foregroundStyle(Palette.tertiary)
                     .allowsHitTesting(false)
             }
             TextField("", text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 16))
+                .font(.system(size: 15))
                 .foregroundStyle(Palette.foreground)
                 .focused($focused)
                 .onSubmit {
@@ -2046,6 +2050,16 @@ private struct HistoryComposeInput: View {
                     onSubmit(trimmed)
                 }
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Palette.elevated.opacity(0.6))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(focused ? Palette.muted.opacity(0.5) : Palette.border, lineWidth: 1)
+        )
         .onAppear { focused = true }
     }
 }
