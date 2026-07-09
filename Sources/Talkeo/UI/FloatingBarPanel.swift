@@ -48,6 +48,10 @@ final class FloatingBarPanel {
     /// revealed when the cursor reaches the edge (at any height), retracting once
     /// the cursor crosses back past its width line. Off = always visible.
     private var autoHide = false
+    /// While true the bar stays revealed regardless of the cursor — set while
+    /// one of its option popovers is open, so the bar never retracts from
+    /// under the UI it just opened.
+    private var holdRevealed = false
     /// Whether the feature itself is on (the separate show/hide toggle).
     private var featureVisible = true
     /// Current revealed/retracted state, for hysteresis + animation gating.
@@ -227,6 +231,15 @@ final class FloatingBarPanel {
         evaluate(animated: true)
     }
 
+    /// Hold the bar revealed while an option popover is open (and let it
+    /// retract again once released). Safe to call redundantly.
+    func setHoldRevealed(_ value: Bool) {
+        guard holdRevealed != value else { return }
+        holdRevealed = value
+        guard featureVisible else { return }
+        evaluate(animated: true)
+    }
+
     // MARK: Dock-style hot-zone
 
     private func refreshTracking() {
@@ -248,8 +261,9 @@ final class FloatingBarPanel {
     /// Decide whether the bar should be revealed, mirroring the Dock's invisible
     /// hot-zone — rotated 90° for a right-edge vertical bar. Reveal triggers
     /// anywhere along the right edge (any Y); once revealed it stays until the
-    /// cursor crosses left past the bar's width line. A live selection also keeps
-    /// it out. With auto-hide off, it's always revealed.
+    /// cursor crosses left past the bar's width line. A live selection or an
+    /// open option popover also keeps it out. With auto-hide off, it's always
+    /// revealed.
     private func evaluate(animated: Bool) {
         guard featureVisible else { return }
         let screen = barScreen()
@@ -263,7 +277,7 @@ final class FloatingBarPanel {
 
         // Hysteresis: harder to trigger (edge), easier to keep (width line).
         let inZone = revealed ? (mouseX >= hideLineX) : (mouseX >= revealEdgeX)
-        let shouldReveal = !autoHide || inZone || model.hasSelection
+        let shouldReveal = !autoHide || inZone || model.hasSelection || holdRevealed
         setRevealed(shouldReveal, animated: animated)
     }
 
@@ -406,9 +420,13 @@ struct FloatingBarView: View {
         if #available(macOS 26.0, *) {
             stack
                 .glassEffect(.regular, in: Capsule(style: .continuous))
+                // Hairline edge: pure glass melts into light windows (e.g. a
+                // Finder window reaching the right edge); this keeps the pill
+                // legible there without losing the native look.
+                .overlay(Capsule(style: .continuous).strokeBorder(Color.primary.opacity(0.12), lineWidth: 1))
                 // Symmetric shadow (no vertical offset) so the bar reads as
                 // centered — an offset shadow made the retracted sliver look low.
-                .shadow(color: .black.opacity(0.14), radius: 6)
+                .shadow(color: .black.opacity(0.20), radius: 8)
         } else {
             stack
                 .background(

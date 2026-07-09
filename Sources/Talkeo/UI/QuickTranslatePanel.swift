@@ -33,6 +33,11 @@ final class QuickTranslatePanel {
     private var topAnchor: CGFloat = 0
     private var leftAnchor: CGFloat = 0
 
+    /// Fires with `true` when the popover comes on screen and `false` once it
+    /// leaves, whatever the path (dismiss click, close button, Replace). The
+    /// owner uses it to hold the floating bar revealed while we're open.
+    var onVisibilityChange: ((Bool) -> Void)?
+
     private static let width: CGFloat = 400
     private static let nominalHeight: CGFloat = 170
     private static let maxHeight: CGFloat = 600
@@ -141,6 +146,7 @@ final class QuickTranslatePanel {
         TTSAudioPlayer.shared.stop()
         panel.orderOut(nil)
         panel.alphaValue = 1
+        onVisibilityChange?(false)
     }
 
     private func present() {
@@ -156,6 +162,7 @@ final class QuickTranslatePanel {
             }
         }
         installDismissMonitor()
+        onVisibilityChange?(true)
     }
 
     func hide() {
@@ -170,6 +177,9 @@ final class QuickTranslatePanel {
             self?.panel.orderOut(nil)
             self?.panel.alphaValue = 1
         })
+        // Release the bar as soon as the fade starts — visually the popover is
+        // already going away, so the bar may retract with it.
+        onVisibilityChange?(false)
     }
 
     /// Pin the top-left so the popover grows downward from a fixed point, tucked
