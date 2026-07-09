@@ -1728,6 +1728,22 @@ private struct SelectableText: NSViewRepresentable {
         return ceil(rect.height) + 6
     }
 
+    /// Real layout height of `textView`'s current content at `width` — reads
+    /// the same layout manager/text container the view renders with, instead
+    /// of a separate `NSString.boundingRect` estimate that can diverge from it
+    /// (notably: reserving a phantom extra line when a wrapped line exactly
+    /// fills the container width). Falls back to `height(of:width:)` on the
+    /// rare case the layout manager isn't available yet.
+    static func measuredHeight(_ textView: NSTextView, width: CGFloat) -> CGFloat {
+        guard let layoutManager = textView.layoutManager, let container = textView.textContainer else {
+            return height(of: textView.string, width: width)
+        }
+        container.containerSize = NSSize(width: max(width, 1), height: .greatestFiniteMagnitude)
+        layoutManager.ensureLayout(for: container)
+        let used = layoutManager.usedRect(for: container)
+        return ceil(used.height) + textView.textContainerInset.height * 2
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(onSelect: onSelect, onTextChange: onTextChange, onCommit: onCommit)
     }
@@ -1811,8 +1827,11 @@ private struct SelectableText: NSViewRepresentable {
 
         // Deterministic content height (text + width), floored and capped — past
         // the cap the scroll view takes over instead of the popover growing
-        // off-screen.
-        let full = SelectableText.height(of: text, width: width)
+        // off-screen. Measured off the text view's own layout manager (not a
+        // separate `boundingRect` estimate) — `NSString.boundingRect` reserves a
+        // phantom extra line whenever a wrapped line exactly fills the width,
+        // which read as the box growing/scrolling one line early.
+        let full = SelectableText.measuredHeight(textView, width: width)
         let target = min(max(full, minHeight), maxHeight)
         scroll.hasVerticalScroller = full > maxHeight + 0.5
         if abs(target - height) > 0.5 {
@@ -1878,6 +1897,25 @@ private final class WordSelectingTextView: NSTextView {
 
     /// Register a selection on the first click even when the panel isn't key.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// This app is a menu-bar accessory with no app-wide Edit menu (nothing
+    /// establishes Cmd+A/C/V/X as key equivalents), so the standard editing
+    /// shortcuts never reach us through the usual menu route — handle them
+    /// directly instead of depending on one.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+              let key = event.charactersIgnoringModifiers?.lowercased() else {
+            return super.performKeyEquivalent(with: event)
+        }
+        switch key {
+        case "a": selectAll(nil)
+        case "c": copy(nil)
+        case "v": paste(nil)
+        case "x": cut(nil)
+        default: return super.performKeyEquivalent(with: event)
+        }
+        return true
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         drawMarkers()
