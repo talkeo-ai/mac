@@ -113,6 +113,14 @@ final class QuickTranslatePanel {
     }
 
     func show(text: String) {
+        // Toggle: re-tapping Translate for the text already on screen means
+        // "close it", not "present it again". A different selection still
+        // switches the content instead of dismissing.
+        if panel.isVisible, model.mode == .translate,
+           model.sourceText == text.trimmingCharacters(in: .whitespacesAndNewlines) {
+            hide()
+            return
+        }
         model.translate(text)
         // A single word goes straight to its explain card (the translation still
         // streams in the background, so removing the card falls back to it).
@@ -137,7 +145,13 @@ final class QuickTranslatePanel {
     }
 
     /// Translate tapped with nothing selected — show the local history list.
+    /// A bare tap while the popover is already open (whatever it shows) reads
+    /// as "close it", so it toggles off instead of switching to history.
     func showHistory() {
+        if panel.isVisible {
+            hide()
+            return
+        }
         model.showHistory()
         present()
     }
@@ -916,8 +930,6 @@ struct QuickTranslateView: View {
     /// Measured natural height of the improve correction card, so it scrolls
     /// internally past a cap instead of growing the popover off-screen.
     @State private var cardHeight: CGFloat = 120
-    /// Same for the explain card (select-to-explain) — see `explainSection`.
-    @State private var explainHeight: CGFloat = 200
 
     /// Red tint marking the changed fragments in the original (Improve). Clearly
     /// visible for the currently-paged correction; `drawMarkers` dims the rest.
@@ -937,12 +949,6 @@ struct QuickTranslateView: View {
     /// with source + translation both capped, the whole popover stays well
     /// under half the screen even for long pasted text.
     static let textBoxMaxHeight: CGFloat = 160
-    /// Cap for the explain card; taller cards scroll internally. While a card
-    /// is open only ONE pane stays expanded (the other collapses to its
-    /// header), so the worst case — header 26 + box 160+20 + collapsed header
-    /// 26 + card 220 + dividers/gaps/padding — lands around 570, under the
-    /// panel's 600 cap without tightening the expanded box.
-    static let explainMaxHeight: CGFloat = 220
     /// How many recent entries show inline under the source card in History.
     /// Older ones live in the main app's History screen, reached via
     /// `fullHistoryLink`.
@@ -1118,28 +1124,27 @@ struct QuickTranslateView: View {
     /// updating in place (Linear's persistent-viewport pattern: swap the
     /// content, not the container).
     ///
-    /// While an explain card is open only ONE pane keeps its text box; the
-    /// other collapses to just its header (its 26pt row stays, so nothing
-    /// jumps), which becomes the tap target to switch — expanding it to
-    /// select words there too.
+    /// While an explain card is open only ONE pane keeps its text box, and
+    /// shadcn-style tabs in the header pick which one — so words can be
+    /// selected on either side without both boxes crowding the card out.
     @ViewBuilder
     private var sourceCardSection: some View {
-        let sourceCollapsed = model.activeTerm != nil && model.focusedPane == .target
-        let targetCollapsed = model.activeTerm != nil && model.focusedPane != .target
+        let explaining = model.activeTerm != nil
+        let sourceCollapsed = explaining && model.focusedPane == .target
 
         HStack(alignment: .center) {
             if model.mode == .history {
                 Text("Translate")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Palette.foreground)
-            } else if sourceCollapsed {
-                expandButton(for: .source)
+            } else if explaining {
+                paneTabs
             } else {
                 cardLabel(QuickTranslateModel.languageName(model.detectedLang))
             }
             Spacer()
             if model.mode == .translate, !sourceCollapsed {
-                QuickIconButton(system: model.sourceEditing ? "checkmark" : "pencil") {
+                QuickIconButton(icon: model.sourceEditing ? .system("checkmark", weight: .bold) : .pencil) {
                     if model.sourceEditing { model.commitEdit() } else { model.beginEdit() }
                 }
                 if !model.sourceText.isEmpty, !model.sourceEditing {
@@ -1155,6 +1160,19 @@ struct QuickTranslateView: View {
                         pb.setString(model.sourceText, forType: .string)
                     }
                 }
+            } else if model.mode == .translate, !model.targetText.isEmpty {
+                // Target tab active: the same slots act on the translation
+                // (no pencil — the translation isn't editable).
+                if model.language(for: .target) == "EN" {
+                    QuickIconButton(system: "speaker.wave.2") {
+                        Speaker.speak(model.targetText, lang: "EN")
+                    }
+                }
+                QuickIconButton(system: "doc.on.doc") {
+                    let pb = NSPasteboard.general
+                    pb.clearContents()
+                    pb.setString(model.targetText, forType: .string)
+                }
             }
             Button(action: onClose) {
                 Image(systemName: "xmark")
@@ -1169,8 +1187,13 @@ struct QuickTranslateView: View {
         }
         .frame(height: 26)
 
+        // The one text box: normally the source; while explaining, whichever
+        // pane the tabs picked.
         if !sourceCollapsed {
             sourceCard
+        } else {
+            paneText(.target, height: $targetHeight)
+                .cardChrome()
         }
 
         if model.mode == .history {
@@ -1192,42 +1215,57 @@ struct QuickTranslateView: View {
             }
         } else if !model.sourceEditing {
             Divider().overlay(Palette.border).opacity(0.6)
-            if targetCollapsed {
-                HStack {
-                    expandButton(for: .target)
-                    Spacer()
-                }
-                .frame(height: 26)
+            if explaining {
+                explainSection
             } else {
                 paneView(.target, height: $targetHeight)
-            }
-
-            if model.activeTerm != nil {
-                Divider().overlay(Palette.border).opacity(0.6)
-                explainSection
-            } else if model.phase == .done {
-                // Make the select-to-explain feature discoverable — nothing
-                // else hints that the text is interactive.
-                selectHint
+                if model.phase == .streaming || model.phase == .done {
+                    // Make the select-to-explain feature discoverable — nothing
+                    // else hints that the text is interactive. Present from the
+                    // skeleton on (not just .done), so the row's height is part of
+                    // the loading layout and the popover doesn't jump when the
+                    // translation lands.
+                    selectHint
+                }
             }
         }
     }
 
-    /// The collapsed pane's header-as-button: same label in the same spot,
-    /// plus a chevron so it reads as expandable. Tapping brings that pane's
-    /// text back (collapsing the other) so words can be selected there too.
-    private func expandButton(for pane: QuickTranslateModel.Pane) -> some View {
-        Button(action: { model.switchFocus(to: pane) }) {
-            HStack(spacing: 5) {
-                cardLabel(QuickTranslateModel.languageName(model.language(for: pane)))
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(Palette.tertiary)
-            }
-            .contentShape(Rectangle())
+    /// shadcn-style tabs shown while an explain card is open: inactive labels
+    /// on a muted track, the active one lifted on a surface pill. Switching
+    /// swaps which pane's text box is visible.
+    private var paneTabs: some View {
+        HStack(spacing: 2) {
+            paneTab(.source)
+            paneTab(.target)
+        }
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Palette.elevated)
+        )
+    }
+
+    private func paneTab(_ pane: QuickTranslateModel.Pane) -> some View {
+        let active = model.focusedPane == pane
+        return Button(action: { model.switchFocus(to: pane) }) {
+            Text(QuickTranslateModel.languageName(model.language(for: pane)).uppercased())
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(active ? Palette.foreground : Palette.muted)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(active ? Palette.surface : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(active ? Palette.border : Color.clear, lineWidth: 1)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         }
         .buttonStyle(.plain)
-        .help("Show this text")
         .handCursor()
     }
 
@@ -1243,21 +1281,11 @@ struct QuickTranslateView: View {
         .frame(maxWidth: .infinity, alignment: .center)
     }
 
-    /// The explain card, height-capped: sized to content while it fits,
-    /// scrolling internally past `explainMaxHeight` so it never pushes the
-    /// popover (which keeps both panes visible above it) off the screen.
-    /// Same measured-height pattern as the improve correction card.
+    /// The explain card at its full height — no internal scroll; the popover
+    /// grows to fit instead (only one pane's box is up while explaining, so
+    /// there's headroom under the panel's 600pt cap for any realistic card).
     private var explainSection: some View {
-        ScrollView(.vertical, showsIndicators: true) {
-            cardSection
-                .background(
-                    GeometryReader { geo in
-                        Color.clear.preference(key: ExplainCardHeightKey.self, value: geo.size.height)
-                    }
-                )
-        }
-        .frame(height: min(max(explainHeight, 1), QuickTranslateView.explainMaxHeight))
-        .onPreferenceChange(ExplainCardHeightKey.self) { explainHeight = $0 }
+        cardSection
     }
 
     /// The one persistent text box for whatever's being translated: empty and
@@ -2555,15 +2583,63 @@ private struct ListenTransport: View {
     }
 }
 
+/// The one non-SF glyph in the row: SF's pencil is a wispy diagonal stick even
+/// in bold, so the edit affordance uses Lucide's pencil (ISC license), traced
+/// from its 24×24 SVG. Arcs are pre-solved from the SVG's endpoint form into
+/// center/angle form; all sweep counterclockwise on screen (`clockwise: true`
+/// in CG's y-up convention).
+private struct LucidePencilShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let s = min(rect.width, rect.height) / 24
+        let ox = rect.midX - 12 * s
+        let oy = rect.midY - 12 * s
+        func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * s, y: oy + y * s) }
+
+        var p = Path()
+        // Body: rounded eraser end, both long edges, tiny rounded tip corner.
+        p.move(to: pt(21.174, 6.812))
+        p.addArc(center: pt(19.181, 4.819), radius: 2.819 * s,
+                 startAngle: .degrees(45), endAngle: .degrees(-135), clockwise: true)
+        p.addLine(to: pt(3.842, 16.174))
+        p.addArc(center: pt(5.254, 17.590), radius: 2 * s,
+                 startAngle: .degrees(-134.9), endAngle: .degrees(-163.0), clockwise: true)
+        p.addLine(to: pt(2.021, 21.356))
+        p.addArc(center: pt(2.500, 21.499), radius: 0.5 * s,
+                 startAngle: .degrees(-163.4), endAngle: .degrees(73.3), clockwise: true)
+        p.addLine(to: pt(6.997, 20.658))
+        p.addArc(center: pt(6.415, 18.745), radius: 2 * s,
+                 startAngle: .degrees(73.1), endAngle: .degrees(45.1), clockwise: true)
+        p.closeSubpath()
+        // Ferrule line separating tip from body.
+        p.move(to: pt(15, 5))
+        p.addLine(to: pt(19, 9))
+        return p
+    }
+}
+
+private enum QuickIcon {
+    case system(String, weight: Font.Weight)
+    case pencil
+}
+
 private struct QuickIconButton: View {
-    let system: String
+    let icon: QuickIcon
     let action: () -> Void
     @State private var hover = false
 
+    init(system: String, weight: Font.Weight = .medium, action: @escaping () -> Void) {
+        self.icon = .system(system, weight: weight)
+        self.action = action
+    }
+
+    init(icon: QuickIcon, action: @escaping () -> Void) {
+        self.icon = icon
+        self.action = action
+    }
+
     var body: some View {
         Button(action: action) {
-            Image(systemName: system)
-                .font(.system(size: 12, weight: .medium))
+            glyph
                 .foregroundStyle(Palette.muted)
                 .frame(width: 26, height: 26)
                 .background(
@@ -2574,6 +2650,20 @@ private struct QuickIconButton: View {
         .buttonStyle(.plain)
         .onHover { hover = $0 }
         .handCursor()
+    }
+
+    @ViewBuilder
+    private var glyph: some View {
+        switch icon {
+        case .system(let name, let weight):
+            Image(systemName: name)
+                .font(.system(size: 12, weight: weight))
+        case .pencil:
+            // Lucide's native proportions: stroke 2 on a 24 box.
+            LucidePencilShape()
+                .stroke(style: StrokeStyle(lineWidth: 13 * 2 / 24, lineCap: .round, lineJoin: .round))
+                .frame(width: 13, height: 13)
+        }
     }
 }
 
@@ -2588,16 +2678,6 @@ private struct QuickSizeKey: PreferenceKey {
 /// Natural (uncapped) height of the improve correction card, reported up so the
 /// surrounding scroll view can size to content up to its cap.
 private struct ImproveCardHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        let next = nextValue()
-        if next > value { value = next }
-    }
-}
-
-/// Natural (uncapped) height of the explain card, reported up so its scroll
-/// view sizes to content up to `QuickTranslateView.explainMaxHeight`.
-private struct ExplainCardHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         let next = nextValue()
