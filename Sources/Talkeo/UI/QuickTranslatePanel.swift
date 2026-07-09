@@ -32,6 +32,8 @@ final class QuickTranslatePanel {
     private var dismissMonitor: Any?
     private var topAnchor: CGFloat = 0
     private var leftAnchor: CGFloat = 0
+    /// Deferred window shrink — see `resize(to:)`.
+    private var pendingShrink: DispatchWorkItem?
 
     /// "Full history" tapped in the Translate/History view. Mirrors
     /// `FloatingBarPanel.onOpenApp` — this panel doesn't know the main app
@@ -146,6 +148,8 @@ final class QuickTranslatePanel {
     /// for ~140ms, so a fallback ⌘V could land here instead of the target app.
     private func closeImmediately() {
         removeDismissMonitor()
+        pendingShrink?.cancel()
+        pendingShrink = nil
         Speaker.stop() // never let playback outlive the popover
         TTSAudioPlayer.shared.stop()
         panel.orderOut(nil)
@@ -154,8 +158,14 @@ final class QuickTranslatePanel {
 
     private func present() {
         computeAnchor()
-        let origin = NSPoint(x: leftAnchor, y: topAnchor - Self.nominalHeight)
-        panel.setFrame(NSRect(origin: origin, size: NSSize(width: Self.width, height: Self.nominalHeight)), display: true)
+        // Keep the current height when already visible — snapping down to the
+        // nominal height would clip content that's still animating (the next
+        // preference-driven `resize` settles it). Fresh presentations start at
+        // the nominal height as before.
+        pendingShrink?.cancel()
+        pendingShrink = nil
+        let height = panel.isVisible ? panel.frame.height : Self.nominalHeight
+        panel.setFrame(frame(forHeight: height), display: true)
         if !panel.isVisible {
             panel.alphaValue = 0
             panel.orderFrontRegardless()
@@ -169,6 +179,8 @@ final class QuickTranslatePanel {
 
     func hide() {
         removeDismissMonitor()
+        pendingShrink?.cancel()
+        pendingShrink = nil
         Speaker.stop() // never let playback outlive the popover
         TTSAudioPlayer.shared.stop()
         guard panel.isVisible, panel.alphaValue > 0 else { return }
@@ -192,23 +204,44 @@ final class QuickTranslatePanel {
 
     /// Resize to content height, growing downward from `topAnchor`, clamped to
     /// the screen so a long translation never spills off the bottom.
+    ///
+    /// The window must never be SMALLER than the content while the content is
+    /// mid-animation: the content's `withAnimation` transitions (0.22s) lag the
+    /// preference-reported target size, and a window already at the smaller
+    /// final size hard-clips the still-animating content — rows sliced off at
+    /// a square edge, no rounded corner (the rounding is SwiftUI's clipShape
+    /// on the content, not a native window shape). So: grow immediately, but
+    /// defer shrinks until the content animation has landed. The panel is
+    /// transparent and the chrome is drawn at content size, so the oversized
+    /// window in the interim is invisible.
+    ///
+    /// (Animating the window frame itself was tried and reverted — the corner
+    /// clip and vibrancy redraw lag the native resize and flash square.)
     private func resize(to size: CGSize) {
         let height = min(max(size.height, 56), Self.maxHeight)
+        pendingShrink?.cancel()
+        pendingShrink = nil
+        if height >= panel.frame.height - 0.5 {
+            panel.setFrame(frame(forHeight: height), display: true, animate: false)
+        } else {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.pendingShrink = nil
+                self.panel.setFrame(self.frame(forHeight: height), display: true, animate: false)
+            }
+            pendingShrink = work
+            // Slightly past the longest content animation (0.22s translate/open,
+            // 0.3s reveal), so the clip only ever trims transparent overhang.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.32, execute: work)
+        }
+    }
+
+    private func frame(forHeight height: CGFloat) -> NSRect {
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         var origin = NSPoint(x: leftAnchor, y: topAnchor - height)
         if origin.y < visible.minY + 8 { origin.y = visible.minY + 8 }
         if origin.y + height > visible.maxY - 8 { origin.y = visible.maxY - 8 - height }
-        // Instant, not animated: this is a borderless panel whose rounded
-        // corners are drawn by SwiftUI (clipShape) over vibrancy, not a native
-        // window shape. Animating the actual window frame (tried this, reverted
-        // it) resizes the backing layer natively and the corner clip and the
-        // vibrancy material redraw visibly lag behind it for a frame or two —
-        // square corners flash mid-resize. The smooth part already comes from
-        // SwiftUI's own `withAnimation` on the content (the source card is one
-        // persistent view — see `QuickTranslateView.sourceCard` — so there's no
-        // view-to-view morph to keep in sync here, just this window matching
-        // the content's already-final size).
-        panel.setFrame(NSRect(origin: origin, size: NSSize(width: Self.width, height: height)), display: true, animate: false)
+        return NSRect(origin: origin, size: NSSize(width: Self.width, height: height))
     }
 
     private func installDismissMonitor() {
@@ -868,6 +901,12 @@ struct QuickTranslateView: View {
             }
         )
         .onPreferenceChange(QuickSizeKey.self) { onResize($0) }
+        // Pin to the window's top: the window can briefly be taller than the
+        // content (shrinks are deferred until content animations land — see
+        // `QuickTranslatePanel.resize(to:)`), and default centering would make
+        // the whole popover drift down and snap back on every shrink. Outside
+        // the GeometryReader so the reported size stays the content's own.
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     static let width: CGFloat = 400
