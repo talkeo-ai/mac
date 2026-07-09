@@ -59,14 +59,15 @@ final class FloatingBarPanel {
     private var pollTimer: Timer?
     private var slideTimer: Timer?
     private var cursorMonitors: [Any] = []
-    /// Ticks while the cursor sits over the bar, repeatedly reasserting the
-    /// pointing-hand. Even with `BackgroundCursor` granted, the active app
-    /// behind (e.g. a terminal) keeps receiving the mouse-moved events — key
-    /// stays with it by design — and re-sets its own cursor on each one, so a
-    /// single set can still be overwritten. Re-asserting on a tight timer means
-    /// any overwrite self-corrects within a frame instead of sticking.
+    /// Ticks while the cursor sits over the bar, reasserting the pointing-hand.
+    /// Even with `BackgroundCursor` granted, the active app behind (e.g. a
+    /// terminal) keeps receiving the mouse-moved events — key stays with it by
+    /// design — and re-sets its own cursor on each one. Those stomps are
+    /// countered move-for-move in `syncCursor`; this low-rate timer only covers
+    /// ones that arrive without a move (the active app's own timers, etc.), so
+    /// a loss self-corrects within ~2 frames without burning the main thread.
     private var cursorReassertTimer: Timer?
-    private static let cursorReassertInterval: TimeInterval = 1.0 / 120.0
+    private static let cursorReassertInterval: TimeInterval = 1.0 / 30.0
     /// Whether the last sync found the cursor over the visible pill, so leaving
     /// it restores the arrow exactly once (a background-set cursor that nobody
     /// else corrects would otherwise stick, e.g. over the desktop).
@@ -128,19 +129,24 @@ final class FloatingBarPanel {
 
     deinit { removeCursorMonitor() }
 
-    /// SwiftUI's `onContinuousHover` doesn't reliably set the cursor on a
-    /// non-key, non-activating panel, so we watch mouse-moves ourselves
-    /// (global for moves delivered to other apps, local for our own) and keep
-    /// the cursor in sync with where it sits. `BackgroundCursor` makes those
-    /// sets stick; `cursorReassertTimer` wins the remaining contention with
-    /// the active app.
+    /// SwiftUI's hover tracking can't own the cursor on a non-key,
+    /// non-activating panel, so we watch mouse-moves ourselves (global for
+    /// moves delivered to other apps, local for our own) and keep the cursor
+    /// in sync with where it sits. `BackgroundCursor` makes those sets stick.
+    /// These handlers run for every mouse move on the system, so they must be
+    /// cheap: the event already carries the location (no window-server query),
+    /// leaving just a rect test on the common path.
     private func installCursorMonitor() {
         removeCursorMonitor()
-        let global = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
-            self?.syncCursor()
+        let global = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
+            // Global mouse-moved events have no window: their location is
+            // already in screen coordinates.
+            self?.syncCursor(at: event.locationInWindow)
         }
         let local = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            self?.syncCursor()
+            let screenPoint = event.window.map { $0.convertPoint(toScreen: event.locationInWindow) }
+                ?? event.locationInWindow
+            self?.syncCursor(at: screenPoint)
             return event
         }
         cursorMonitors = [global, local].compactMap { $0 }
@@ -162,10 +168,14 @@ final class FloatingBarPanel {
     /// Keep the cursor truthful around the bar: pointing-hand while over the
     /// visible pill, restored to the arrow the moment it leaves (the active
     /// app re-applies its own cursor on its next mouse-move if it wants
-    /// something else, e.g. an I-beam over text).
-    private func syncCursor() {
-        if panel.isVisible, cursorRect.contains(NSEvent.mouseLocation) {
+    /// something else, e.g. an I-beam over text). Callers with a location in
+    /// hand pass it; timer/lifecycle callers fall back to querying it.
+    private func syncCursor(at location: NSPoint? = nil) {
+        let point = location ?? NSEvent.mouseLocation
+        if panel.isVisible, cursorRect.contains(point) {
             cursorIsOverBar = true
+            // One set per move while inside: the active app stomps the cursor
+            // per move it receives, so matching its rate keeps us on top.
             NSCursor.pointingHand.set()
             startCursorReassertTimer()
         } else {
@@ -405,11 +415,10 @@ struct FloatingBarView: View {
             // center in the window (the panel sizes to this), so shown and
             // auto-hidden states share the exact same vertical center.
             .padding(8)
-            // Full opacity for a clean, native glass look — staying out of the way
-            // is handled by auto-hide, not by fading the bar.
-            .onContinuousHover { phase in
-                if case .active = phase { NSCursor.pointingHand.set() }
-            }
+        // Full opacity for a clean, native glass look — staying out of the way
+        // is handled by auto-hide, not by fading the bar. No hover tracking at
+        // this level either: the cursor is owned by FloatingBarPanel.syncCursor,
+        // and extra per-move SwiftUI tracking made fast in-bar movement laggy.
     }
 
     /// Native Liquid Glass on macOS 26+ (a single Dock-like capsule slab that
@@ -464,21 +473,23 @@ private struct BarButton: View {
         }
         .buttonStyle(.plain)
         .help(help)
+        // Highlight only — the hand cursor is owned by FloatingBarPanel.syncCursor.
         .onHover { isHover = $0 }
-        // Force the hand cursor on every move; in a non-activating panel AppKit's
-        // cursor-rect machinery doesn't run, so a stray I-beam could otherwise show.
-        .onContinuousHover { phase in
-            if case .active = phase { NSCursor.pointingHand.set() }
-        }
         .animation(.easeOut(duration: 0.18), value: isActive)
     }
 }
 
 private struct FloatingBrandIcon: View {
+    /// Loaded once — resolving the bundle URL and decoding the PNG in `body`
+    /// meant disk I/O on the main thread on every re-render.
+    private static let iconImage: NSImage? = {
+        guard let url = Bundle.main.url(forResource: "icon", withExtension: "png") else { return nil }
+        return NSImage(contentsOf: url)
+    }()
+
     var body: some View {
         Group {
-            if let url = Bundle.main.url(forResource: "icon", withExtension: "png"),
-               let nsImage = NSImage(contentsOf: url) {
+            if let nsImage = Self.iconImage {
                 Image(nsImage: nsImage)
                     .resizable()
                     .interpolation(.high)
