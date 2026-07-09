@@ -18,6 +18,13 @@ final class MainWindowController: NSObject {
         installMainMenuIfNeeded()
     }
 
+    /// Deep-link for the popover's "Full history": land on Translate with the
+    /// history drawer open.
+    func openTranslateHistory() {
+        model.translate.historyOpen = true
+        show(section: .translate)
+    }
+
     /// Order the main window front and focus the app. Pass a section to land
     /// on it; nil keeps whatever the user last had open.
     func show(section: MainSection? = nil) {
@@ -408,6 +415,8 @@ final class TranslatePageModel: ObservableObject {
     @Published private(set) var isStreaming = false
     @Published private(set) var errorMessage: String?
     @Published private(set) var entries: [HistoryEntry] = []
+    /// Whether the history drawer (right side) is open.
+    @Published var historyOpen = false
 
     private let client: TransformClient
     private let history: HistoryStore
@@ -519,6 +528,11 @@ final class TranslatePageModel: ObservableObject {
         entries = history.all()
     }
 
+    func delete(_ entry: HistoryEntry) {
+        history.remove(id: entry.id)
+        refreshHistory()
+    }
+
     private func reset(keepText: Bool) {
         streamTask?.cancel()
         generation += 1
@@ -545,31 +559,26 @@ final class TranslatePageModel: ObservableObject {
     }
 }
 
-/// The in-app translator: Google Translate distilled — language chips with a
-/// swap in between, side-by-side source/translation panes, translate-as-you-
-/// type, and the local history underneath (rows load back into the panes).
+/// The in-app translator: Google Translate distilled — language chips over
+/// their panes with a swap on the gutter, side-by-side source/translation
+/// panes, translate-as-you-type, and a collapsible history drawer on the
+/// right. The space under the panes is reserved for selected meanings
+/// (explain cards, mirroring the popover's select-to-learn).
 private struct TranslatePage: View {
     @ObservedObject var model: TranslatePageModel
 
     var body: some View {
-        // No page scroll (SPA): translator fixed at top, history owns the
-        // remaining space with its own scroll.
-        VStack(spacing: 18) {
-            languageBar
+        HStack(spacing: 0) {
+            translator
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            HStack(alignment: .top, spacing: 14) {
-                sourcePane
-                outputPane
+            if model.historyOpen {
+                Divider().overlay(Palette.border)
+                HistoryPanel(model: model)
+                    .frame(width: 320)
+                    .transition(.move(edge: .trailing))
             }
-            .frame(height: 260)
-
-            historySection
         }
-        .padding(.horizontal, 56)
-        .padding(.top, 44)
-        .padding(.bottom, 24)
-        .frame(maxWidth: 960)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { model.refreshHistory() }
         // Cmd+Return forces an immediate translation (skips the debounce).
         .background(
@@ -579,18 +588,47 @@ private struct TranslatePage: View {
         )
     }
 
-    private var languageBar: some View {
-        HStack(spacing: 12) {
-            Menu {
-                Button("Detect language") { model.pinSource(nil) }
-                Button("English") { model.pinSource("EN") }
-                Button("Spanish") { model.pinSource("ES") }
-            } label: {
-                LangChip(text: model.sourceChipLabel)
+    private var translator: some View {
+        VStack(spacing: 16) {
+            ZStack {
+                languageBar
+                HStack {
+                    Spacer()
+                    PaneIconButton(
+                        system: "clock.arrow.circlepath",
+                        help: model.historyOpen ? "Hide history" : "History"
+                    ) {
+                        withAnimation(.easeOut(duration: 0.18)) { model.historyOpen.toggle() }
+                    }
+                }
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
+
+            HStack(alignment: .top, spacing: 14) {
+                sourcePane
+                outputPane
+            }
+            .frame(height: 260)
+
+            // Reserved: selected meanings (explain cards) will live here.
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 48)
+        .padding(.top, 40)
+        .padding(.bottom, 24)
+        .frame(maxWidth: 960)
+        .frame(maxWidth: .infinity)
+    }
+
+    /// Same column geometry as the panes below: each chip centers over its
+    /// pane, the swap sits on the gutter.
+    private var languageBar: some View {
+        HStack(spacing: 14) {
+            HStack {
+                Spacer(minLength: 0)
+                sourceMenu
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity)
 
             Button(action: { model.swap() }) {
                 Image(systemName: "arrow.left.arrow.right")
@@ -603,57 +641,50 @@ private struct TranslatePage: View {
             .buttonStyle(.plain)
             .help("Swap languages")
 
-            Menu {
-                Button("English") { model.pinTarget("EN") }
-                Button("Spanish") { model.pinTarget("ES") }
-            } label: {
-                LangChip(text: model.targetChipLabel)
+            HStack {
+                Spacer(minLength: 0)
+                targetMenu
+                Spacer(minLength: 0)
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
+            .frame(maxWidth: .infinity)
         }
     }
 
-    @ViewBuilder
-    private var historySection: some View {
-        if model.entries.isEmpty {
-            Spacer(minLength: 0)
-        } else {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("History".uppercased())
-                    .font(.system(size: 11, weight: .bold))
-                    .kerning(1.1)
-                    .foregroundStyle(Palette.tertiary)
-                    .padding(.top, 10)
-
-                ScrollView {
-                    LazyVStack(spacing: 10) {
-                        ForEach(model.entries) { entry in
-                            HistoryRow(entry: entry) { model.select(entry) }
-                        }
-                    }
-                    // Rows have hover fills and hairline strokes; keep a hair
-                    // of inset so the scroll doesn't clip them at the edges.
-                    .padding(1)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    private var sourceMenu: some View {
+        Menu {
+            Button("Detect language") { model.pinSource(nil) }
+            Button("English") { model.pinSource("EN") }
+            Button("Spanish") { model.pinSource("ES") }
+        } label: {
+            LangChip(text: model.sourceChipLabel)
         }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private var targetMenu: some View {
+        Menu {
+            Button("English") { model.pinTarget("EN") }
+            Button("Spanish") { model.pinTarget("ES") }
+        } label: {
+            LangChip(text: model.targetChipLabel)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
     }
 
     private var sourcePane: some View {
         ZStack(alignment: .topLeading) {
-            TextEditor(text: $model.sourceText)
-                .font(.system(size: 16))
-                .lineSpacing(4)
-                .scrollContentBackground(.hidden)
-                .scrollIndicators(.never)
-                .padding(.vertical, 12)
-                .padding(.leading, 12)
+            PlainTextEditor(text: $model.sourceText, onUserEdit: { model.sourceEdited() })
+                .padding(.top, 10)
+                .padding(.leading, 10)
+                .padding(.bottom, 10)
                 // Keep typed text clear of the ✕ button in the corner.
-                .padding(.trailing, 40)
-                .onChange(of: model.sourceText) { _ in model.sourceEdited() }
+                .padding(.trailing, 36)
 
             if model.sourceText.isEmpty {
                 Text("Type or paste text…")
@@ -705,16 +736,13 @@ private struct TranslatePage: View {
                         .padding(17)
                 }
             } else {
-                ScrollView {
-                    Text(model.outputText)
-                        .font(.system(size: 16))
-                        .lineSpacing(4)
-                        .foregroundStyle(Palette.foreground)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                        .padding(17)
-                        .padding(.bottom, 20)
-                }
+                // Read-only native text view: real selection/copy behavior.
+                PlainTextEditor(text: .constant(model.outputText), isEditable: false)
+                    .padding(.top, 10)
+                    .padding(.leading, 10)
+                    .padding(.trailing, 10)
+                    // Keep the last line clear of the copy button.
+                    .padding(.bottom, 32)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -750,19 +778,20 @@ private struct LangChip: View {
     }
 }
 
-/// Small quiet icon button used inside the panes (clear, copy).
+/// Small quiet icon button used inside the panes (clear, copy, history).
 private struct PaneIconButton: View {
     let system: String
     let help: String
+    var size: CGFloat = 26
     let action: () -> Void
     @State private var isHover = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: system)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: size * 0.42, weight: .semibold))
                 .foregroundStyle(isHover ? Palette.foreground : Palette.muted)
-                .frame(width: 26, height: 26)
+                .frame(width: size, height: size)
                 .background(Circle().fill(isHover ? Palette.surface : Color.clear))
                 .contentShape(Circle())
         }
@@ -786,40 +815,192 @@ private struct CopyButton: View {
     }
 }
 
+/// Right-side history drawer: quiet, Google-style rows (language pair line,
+/// source/target, delete on hover) separated by hairlines.
+private struct HistoryPanel: View {
+    @ObservedObject var model: TranslatePageModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("History")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Palette.foreground)
+                Spacer()
+                PaneIconButton(system: "xmark", help: "Close history") {
+                    withAnimation(.easeOut(duration: 0.18)) { model.historyOpen = false }
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 20)
+            .padding(.bottom, 8)
+
+            if model.entries.isEmpty {
+                Text("Translations you make will show up here.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Palette.muted)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 8)
+                Spacer(minLength: 0)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(model.entries) { entry in
+                            HistoryRow(
+                                entry: entry,
+                                select: { model.select(entry) },
+                                delete: { model.delete(entry) }
+                            )
+                            if entry.id != model.entries.last?.id {
+                                Divider()
+                                    .overlay(Palette.border)
+                                    .padding(.horizontal, 18)
+                            }
+                        }
+                    }
+                    .padding(.bottom, 12)
+                }
+            }
+        }
+    }
+}
+
 /// One history entry; clicking it loads the pair back into the translator.
 private struct HistoryRow: View {
     let entry: HistoryEntry
-    let action: () -> Void
+    let select: () -> Void
+    let delete: () -> Void
     @State private var isHover = false
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 6) {
+        Button(action: select) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text("\(QuickTranslateModel.languageName(entry.detectedLang)) → \(QuickTranslateModel.languageName(entry.translateLang))")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Palette.tertiary)
+                    Spacer(minLength: 0)
+                    PaneIconButton(system: "trash", help: "Delete", size: 20) { delete() }
+                        .opacity(isHover ? 1 : 0)
+                }
                 Text(entry.source)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Palette.foreground)
                     .lineLimit(1)
                 Text(entry.target)
-                    .font(.system(size: 14))
+                    .font(.system(size: 13))
                     .foregroundStyle(Palette.muted)
                     .lineLimit(1)
             }
-            .padding(.vertical, 12)
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(isHover ? Palette.elevated : Color.clear)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Palette.border, lineWidth: 1)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(isHover ? Palette.elevated : Color.clear)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { isHover = $0 }
-        .help("\(entry.detectedLang.uppercased()) → \(entry.translateLang.uppercased()) · \(entry.timestamp.formatted(date: .abbreviated, time: .shortened))")
+        .help(entry.timestamp.formatted(date: .abbreviated, time: .shortened))
+    }
+}
+
+// MARK: - Native text editor
+
+/// Minimal NSTextView wrapper for the translator panes. SwiftUI's TextEditor
+/// misbehaves for real editing here (selection/paste — same class of problem
+/// feat/ui-options hit in the popover inputs), so the panes use the real
+/// thing: native selection, context menu, undo, and overlay scrollers that
+/// only appear when the content actually overflows.
+private struct PlainTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    var isEditable = true
+    /// Fired only on user edits (typing/paste) — programmatic `text` updates
+    /// don't trigger it, so loading history entries doesn't re-translate.
+    var onUserEdit: (() -> Void)?
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let textView = ShortcutTextView()
+        textView.isEditable = isEditable
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.drawsBackground = false
+        textView.textColor = Palette.nsForeground
+        textView.insertionPointColor = Palette.nsForeground
+        textView.textContainerInset = NSSize(width: 2, height: 2)
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.minSize = .zero
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        textView.delegate = context.coordinator
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 4
+        textView.defaultParagraphStyle = paragraph
+        textView.typingAttributes = [
+            .font: NSFont.systemFont(ofSize: 16),
+            .foregroundColor: Palette.nsForeground,
+            .paragraphStyle: paragraph,
+        ]
+        textView.font = .systemFont(ofSize: 16)
+        textView.string = text
+
+        let scroll = NSScrollView()
+        scroll.documentView = textView
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.drawsBackground = false
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        guard let textView = scroll.documentView as? NSTextView else { return }
+        textView.isEditable = isEditable
+        if textView.string != text {
+            textView.string = text
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        private let parent: PlainTextEditor
+        init(_ parent: PlainTextEditor) { self.parent = parent }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+            parent.onUserEdit?()
+        }
+    }
+}
+
+/// NSTextView that resolves the standard editing shortcuts itself, so they
+/// work no matter what the main menu offers (the fix feat/ui-options landed
+/// for the popover inputs, applied here too).
+private final class ShortcutTextView: NSTextView {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard event.type == .keyDown, mods == .command || mods == [.command, .shift] else {
+            return super.performKeyEquivalent(with: event)
+        }
+        switch event.charactersIgnoringModifiers?.lowercased() {
+        case "a" where mods == .command: selectAll(nil); return true
+        case "c" where mods == .command: copy(nil); return true
+        case "v" where mods == .command: paste(nil); return true
+        case "x" where mods == .command: cut(nil); return true
+        case "z" where mods == .command: undoManager?.undo(); return true
+        case "z": undoManager?.redo(); return true
+        default: return super.performKeyEquivalent(with: event)
+        }
     }
 }
 
