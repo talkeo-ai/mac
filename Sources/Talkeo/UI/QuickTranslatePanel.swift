@@ -11,13 +11,15 @@ import SwiftUI
 /// card below** (meaning, examples, a typed insight). It dismisses on a click
 /// anywhere outside it.
 ///
-/// Presenting activates the app and makes this panel key: opening an option
-/// means the user wants to use it, and only an *active* app gets AppKit's
-/// normal cursor/hover/typing behavior inside its windows (an inactive one
-/// would need the same background-window workarounds as the floating bar).
-/// Activation is quiet — the app is an accessory, so no menu bar or Dock
-/// swap. The app that had focus is captured first: Improve's Replace writes
-/// back into it, and closing the popover hands focus back to it.
+/// Presenting makes this panel key WITHOUT activating the app (Spotlight
+/// style): opening an option means the user wants to use it, so typing and
+/// clicking work immediately — but activating would raise every other Talkeo
+/// window too (e.g. the main app window, when open). The app behind keeps
+/// being the frontmost app, which Improve's Replace depends on. Cursor
+/// correctness inside a key-but-inactive window comes from the same
+/// per-window server tag the floating bar uses (`BackgroundCursor.tagWindow`,
+/// whose documented purpose is exactly this: panels presenting editable
+/// controls from an inactive app).
 final class QuickPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
@@ -43,9 +45,10 @@ final class QuickTranslatePanel {
     /// owner uses it to hold the floating bar revealed while we're open.
     var onVisibilityChange: ((Bool) -> Void)?
 
-    /// The app that had focus when the popover opened. Presenting activates
-    /// us, so by Replace/close time querying frontmost would return Talkeo —
-    /// this is who Improve writes back into and who gets focus back after.
+    /// The app that was frontmost when the popover opened. We don't activate,
+    /// so frontmost normally stays put — but capturing it at open time makes
+    /// Improve's Replace target independent of whatever focus dance happens
+    /// while the popover is up.
     private var previousApp: NSRunningApplication?
 
     private static let width: CGFloat = 400
@@ -177,8 +180,16 @@ final class QuickTranslatePanel {
                 panel.animator().alphaValue = 1
             }
         }
-        NSApp.activate(ignoringOtherApps: true)
+        // Key only — never NSApp.activate(): activation raises the app's other
+        // windows too (the main window, when open), yanking the user out of
+        // their context just for a popover.
         panel.makeKey()
+        // Cursor authority while key-but-inactive (I-beam over text, etc.);
+        // async because tag application is asynchronous in the window server.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            _ = BackgroundCursor.tagWindow(self.panel)
+        }
         installDismissMonitor()
         onVisibilityChange?(true)
     }
