@@ -552,40 +552,24 @@ private struct TranslatePage: View {
     @ObservedObject var model: TranslatePageModel
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("Translate")
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(Palette.foreground)
-                    .padding(.bottom, 4)
+        // No page scroll (SPA): translator fixed at top, history owns the
+        // remaining space with its own scroll.
+        VStack(spacing: 18) {
+            languageBar
 
-                languageBar
-
-                HStack(alignment: .top, spacing: 14) {
-                    sourcePane
-                    outputPane
-                }
-
-                if !model.entries.isEmpty {
-                    Text("History".uppercased())
-                        .font(.system(size: 11, weight: .bold))
-                        .kerning(1.1)
-                        .foregroundStyle(Palette.tertiary)
-                        .padding(.top, 16)
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        ForEach(model.entries) { entry in
-                            HistoryRow(entry: entry) { model.select(entry) }
-                        }
-                    }
-                }
+            HStack(alignment: .top, spacing: 14) {
+                sourcePane
+                outputPane
             }
-            .frame(maxWidth: 920, alignment: .leading)
-            .padding(.horizontal, 56)
-            .padding(.top, 48)
-            .padding(.bottom, 48)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 260)
+
+            historySection
         }
+        .padding(.horizontal, 56)
+        .padding(.top, 44)
+        .padding(.bottom, 24)
+        .frame(maxWidth: 960)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { model.refreshHistory() }
         // Cmd+Return forces an immediate translation (skips the debounce).
         .background(
@@ -605,6 +589,7 @@ private struct TranslatePage: View {
                 LangChip(text: model.sourceChipLabel)
             }
             .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
             .fixedSize()
 
             Button(action: { model.swap() }) {
@@ -625,9 +610,35 @@ private struct TranslatePage: View {
                 LangChip(text: model.targetChipLabel)
             }
             .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
             .fixedSize()
+        }
+    }
 
+    @ViewBuilder
+    private var historySection: some View {
+        if model.entries.isEmpty {
             Spacer(minLength: 0)
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("History".uppercased())
+                    .font(.system(size: 11, weight: .bold))
+                    .kerning(1.1)
+                    .foregroundStyle(Palette.tertiary)
+                    .padding(.top, 10)
+
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(model.entries) { entry in
+                            HistoryRow(entry: entry) { model.select(entry) }
+                        }
+                    }
+                    // Rows have hover fills and hairline strokes; keep a hair
+                    // of inset so the scroll doesn't clip them at the edges.
+                    .padding(1)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
@@ -637,7 +648,11 @@ private struct TranslatePage: View {
                 .font(.system(size: 16))
                 .lineSpacing(4)
                 .scrollContentBackground(.hidden)
-                .padding(12)
+                .scrollIndicators(.never)
+                .padding(.vertical, 12)
+                .padding(.leading, 12)
+                // Keep typed text clear of the ✕ button in the corner.
+                .padding(.trailing, 40)
                 .onChange(of: model.sourceText) { _ in model.sourceEdited() }
 
             if model.sourceText.isEmpty {
@@ -649,7 +664,7 @@ private struct TranslatePage: View {
                     .allowsHitTesting(false)
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 240, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(Palette.elevated)
@@ -698,10 +713,11 @@ private struct TranslatePage: View {
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
                         .padding(17)
+                        .padding(.bottom, 20)
                 }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 240, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(Palette.elevated)
