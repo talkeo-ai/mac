@@ -25,21 +25,25 @@ final class MainWindowController: NSObject {
 
     private func makeWindow() -> NSWindow {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
+            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "Talkeo"
-        // The hero header carries the brand, so the chrome stays minimal.
+        // The sidebar carries the app's identity, so the chrome stays minimal.
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 460, height: 380)
+        window.minSize = NSSize(width: 760, height: 500)
         window.backgroundColor = Palette.nsDynamic(0xFFFFFF, 0x1C1C1C)
         window.contentViewController = NSHostingController(rootView: MainWindowView())
-        window.setFrameAutosaveName("TalkeoMainWindow")
-        window.center()
+        // Open filling the screen (minus menu bar / Dock), like a full-size SPA.
+        if let screen = NSScreen.main ?? NSScreen.screens.first {
+            window.setFrame(screen.visibleFrame, display: true)
+        } else {
+            window.center()
+        }
         return window
     }
 
@@ -90,106 +94,304 @@ final class MainWindowController: NSObject {
     }
 }
 
-// MARK: - SwiftUI content
+// MARK: - Navigation
 
-/// Home view of the main window. For now a brand hero plus a guide to the
-/// floating-bar actions; settings, history and account will grow in here.
+/// Sections of the main window's left-hand menu. The first four mirror the
+/// floating bar's actions; the last two are the user-facing record (transcript
+/// of past translations, estimated English level).
+enum MainSection: String, CaseIterable, Identifiable {
+    case translate, improve, listen, capture, transcript, englishLevel
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .translate: return "Translate"
+        case .improve: return "Improve"
+        case .listen: return "Listen"
+        case .capture: return "Capture"
+        case .transcript: return "Transcript"
+        case .englishLevel: return "English level"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .translate: return "character.bubble"
+        case .improve: return "wand.and.stars"
+        case .listen: return "speaker.wave.2"
+        case .capture: return "camera.viewfinder"
+        case .transcript: return "list.bullet.rectangle"
+        case .englishLevel: return "chart.bar"
+        }
+    }
+
+    static let tools: [MainSection] = [.translate, .improve, .listen, .capture]
+    static let progress: [MainSection] = [.transcript, .englishLevel]
+}
+
+// MARK: - Root view (SPA: sidebar + detail)
+
 struct MainWindowView: View {
+    @State private var selection: MainSection? = .translate
+
     var body: some View {
-        VStack(spacing: 0) {
-            hero
-                .frame(maxWidth: .infinity)
-                .padding(.top, 44)
-                .padding(.bottom, 28)
-
-            Divider().overlay(Palette.border)
-
-            VStack(alignment: .leading, spacing: 14) {
-                Text("From the floating bar")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Palette.muted)
-                    .textCase(.uppercase)
-                    .kerning(0.6)
-
-                actionRow(system: "character.bubble", title: "Translate",
-                          detail: "Select text anywhere and get an instant translation.")
-                actionRow(system: "wand.and.stars", title: "Improve",
-                          detail: "Rewrite your English and replace it in place.")
-                actionRow(system: "speaker.wave.2", title: "Listen",
-                          detail: "Hear the selection with word-by-word highlight.")
-                actionRow(system: "camera.viewfinder", title: "Capture",
-                          detail: "Grab text from the screen (coming soon).")
+        NavigationSplitView {
+            List(selection: $selection) {
+                Section("Tools") {
+                    ForEach(MainSection.tools) { item in
+                        Label(item.title, systemImage: item.icon).tag(item)
+                    }
+                }
+                Section("Your English") {
+                    ForEach(MainSection.progress) { item in
+                        Label(item.title, systemImage: item.icon).tag(item)
+                    }
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 36)
-            .padding(.vertical, 24)
-
-            Spacer(minLength: 0)
-
-            Text("Talkeo lives in the floating bar on the right edge of your screen and in the menu bar.")
-                .font(.system(size: 11))
-                .foregroundStyle(Palette.tertiary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 36)
-                .padding(.bottom, 20)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Palette.surface)
-    }
-
-    private var hero: some View {
-        VStack(spacing: 10) {
-            BrandMark()
-                .frame(width: 56, height: 56)
-            Text("Talkeo")
-                .font(.system(size: 24, weight: .semibold))
-                .foregroundStyle(Palette.foreground)
-            Text("English, woven into your day.")
-                .font(.system(size: 13))
-                .foregroundStyle(Palette.muted)
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 280)
+        } detail: {
+            detail
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Palette.surface)
         }
     }
 
-    private func actionRow(system: String, title: String, detail: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Image(systemName: system)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Palette.foreground)
-                .frame(width: 22)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Palette.foreground)
-                Text(detail)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.muted)
-            }
+    @ViewBuilder
+    private var detail: some View {
+        switch selection ?? .translate {
+        case .translate:
+            ToolPage(
+                section: .translate,
+                summary: "Instant translation of whatever you select, in any app.",
+                steps: [
+                    "Select text anywhere — browser, editor, terminal.",
+                    "Click the translate button in the floating bar.",
+                    "Read the translation in place; it's saved to your transcript."
+                ]
+            )
+        case .improve:
+            ToolPage(
+                section: .improve,
+                summary: "Rewrite your English and replace it right where you wrote it.",
+                steps: [
+                    "Select something you wrote.",
+                    "Click the improve button in the floating bar.",
+                    "Review the diff and replace in place (or copy)."
+                ]
+            )
+        case .listen:
+            ToolPage(
+                section: .listen,
+                summary: "Hear any text out loud with word-by-word highlight.",
+                steps: [
+                    "Select the text you want to hear.",
+                    "Click the listen button in the floating bar.",
+                    "Follow along as each word lights up."
+                ]
+            )
+        case .capture:
+            ToolPage(
+                section: .capture,
+                summary: "Grab text straight from the screen — even where you can't select.",
+                steps: [],
+                comingSoon: true
+            )
+        case .transcript:
+            TranscriptPage()
+        case .englishLevel:
+            EnglishLevelPage()
         }
     }
 }
 
-/// Bundle brand icon with a symbol fallback, mirroring the status bar and
-/// floating bar treatment.
-private struct BrandMark: View {
+// MARK: - Tool pages
+
+/// Detail page for one of the floating-bar tools. Today these document the
+/// tool; they'll grow direct input (paste text here, no selection needed).
+private struct ToolPage: View {
+    let section: MainSection
+    let summary: String
+    let steps: [String]
+    var comingSoon: Bool = false
+
     var body: some View {
-        Group {
-            if let url = Bundle.main.url(forResource: "icon", withExtension: "png"),
-               let nsImage = NSImage(contentsOf: url) {
-                Image(nsImage: nsImage)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFill()
-            } else {
-                Image(systemName: "text.viewfinder")
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundStyle(Palette.foreground)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                PageHeader(icon: section.icon, title: section.title, subtitle: summary)
+
+                if comingSoon {
+                    Text("Coming soon")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Palette.muted)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Palette.elevated))
+                } else {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                Text("\(index + 1)")
+                                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(Palette.muted)
+                                    .frame(width: 20, height: 20)
+                                    .background(Circle().fill(Palette.elevated))
+                                Text(step)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Palette.foreground)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: 620, alignment: .leading)
+            .padding(.horizontal, 48)
+            .padding(.vertical, 40)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+// MARK: - Transcript
+
+/// Everything the user has translated, straight from the local history store.
+private struct TranscriptPage: View {
+    @State private var entries: [HistoryEntry] = []
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                PageHeader(
+                    icon: MainSection.transcript.icon,
+                    title: MainSection.transcript.title,
+                    subtitle: "Everything you've translated with Talkeo."
+                )
+
+                if entries.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Nothing here yet")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(Palette.foreground)
+                        Text("Translations you make from the floating bar will show up here.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Palette.muted)
+                    }
+                    .padding(.top, 8)
+                } else {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(entries) { entry in
+                            TranscriptRow(entry: entry)
+                            if entry.id != entries.last?.id {
+                                Divider().overlay(Palette.border)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: 720, alignment: .leading)
+            .padding(.horizontal, 48)
+            .padding(.vertical, 40)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .onAppear { entries = LocalHistoryStore.shared.all() }
+    }
+}
+
+private struct TranscriptRow: View {
+    let entry: HistoryEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(entry.source)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Palette.foreground)
+                .lineLimit(2)
+            Text(entry.target)
+                .font(.system(size: 13))
+                .foregroundStyle(Palette.muted)
+                .lineLimit(2)
+            HStack(spacing: 8) {
+                Text("\(entry.detectedLang.uppercased()) → \(entry.translateLang.uppercased())")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Palette.muted)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Palette.elevated))
+                Text(entry.timestamp.formatted(date: .abbreviated, time: .shortened))
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.tertiary)
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .stroke(Palette.border, lineWidth: 1)
-        )
+        .padding(.vertical, 12)
+    }
+}
+
+// MARK: - English level
+
+/// The user's estimated English level. No signal is collected yet, so this is
+/// the honest empty state over the CEFR scale; estimation from real usage
+/// (translations, improvements) comes later.
+private struct EnglishLevelPage: View {
+    private static let levels = ["A1", "A2", "B1", "B2", "C1", "C2"]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                PageHeader(
+                    icon: MainSection.englishLevel.icon,
+                    title: MainSection.englishLevel.title,
+                    subtitle: "Talkeo estimates your level from how you actually use English."
+                )
+
+                HStack(spacing: 6) {
+                    ForEach(Self.levels, id: \.self) { level in
+                        Text(level)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Palette.tertiary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Palette.elevated))
+                    }
+                }
+                .frame(maxWidth: 480)
+
+                Text("Not enough data yet. Keep translating, improving and listening — your estimated level will appear here.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Palette.muted)
+            }
+            .frame(maxWidth: 620, alignment: .leading)
+            .padding(.horizontal, 48)
+            .padding(.vertical, 40)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+// MARK: - Shared page chrome
+
+private struct PageHeader: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(Palette.foreground)
+                .frame(width: 44, height: 44)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Palette.elevated)
+                )
+            Text(title)
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(Palette.foreground)
+            Text(subtitle)
+                .font(.system(size: 13))
+                .foregroundStyle(Palette.muted)
+        }
     }
 }
 
@@ -197,5 +399,5 @@ private struct BrandMark: View {
 
 #Preview("Main window") {
     MainWindowView()
-        .frame(width: 520, height: 440)
+        .frame(width: 1100, height: 700)
 }
