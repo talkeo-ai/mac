@@ -136,12 +136,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Reads the selection in the frontmost app and, if any, opens the listen
-    /// (TTS) popover. Listen needs text, so with nothing selected it's a no-op.
+    /// (TTS) popover. Nothing selected opens Listen's own history instead,
+    /// mirroring `translateCurrentSelection()`.
     private func listenCurrentSelection() {
         reader.readSelectedText { [weak self] text in
             guard let self else { return }
             if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 self.quickTranslate.listen(text: text)
+            } else {
+                self.quickTranslate.showListenHistory()
             }
         }
     }

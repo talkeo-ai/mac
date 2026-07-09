@@ -139,7 +139,15 @@ final class QuickTranslatePanel {
     }
 
     /// Listen tapped with text selected — open the Listen card (auto-plays).
+    /// Toggle: re-tapping Listen for the text already playing means "close
+    /// it", not "restart it" — mirrors `show(text:)`. A different selection
+    /// still switches content instead of dismissing.
     func listen(text: String) {
+        if panel.isVisible, model.mode == .listen,
+           model.sourceText == text.trimmingCharacters(in: .whitespacesAndNewlines) {
+            hide()
+            return
+        }
         model.listen(text)
         present()
     }
@@ -153,6 +161,17 @@ final class QuickTranslatePanel {
             return
         }
         model.showHistory()
+        present()
+    }
+
+    /// Listen tapped with nothing selected — show Listen's own history list
+    /// (mirrors `showHistory()`, including the toggle-to-close).
+    func showListenHistory() {
+        if panel.isVisible {
+            hide()
+            return
+        }
+        model.showListenHistory()
         present()
     }
 
@@ -357,6 +376,16 @@ final class QuickTranslateModel: ObservableObject {
     @Published var mode: Mode = .translate
     @Published var historyEntries: [HistoryEntry] = []
 
+    /// Listen's own history (separate store — no target text to show). Loaded
+    /// by `showListenHistory()`.
+    @Published var listenHistoryEntries: [ListenHistoryEntry] = []
+    /// True while Listen shows the compose/history view instead of the
+    /// playback transport. Kept distinct from `sourceText.isEmpty` on purpose:
+    /// `SelectableText` reports every keystroke through `sourceText`, so using
+    /// its emptiness as the discriminator would flip the view away mid-type the
+    /// instant the compose box stopped being empty.
+    @Published var listenComposing: Bool = false
+
     /// Playback speed for the Listen card. These feed `AVAudioPlayer.rate` (the
     /// cloud-voice player), where 1.0 is normal speed — so the values are the
     /// literal multipliers the labels advertise (0.75×/1×/1.25×).
@@ -474,17 +503,24 @@ final class QuickTranslateModel: ObservableObject {
 
     private let client: TransformClient
     private let history: HistoryStore
+    private let listenHistory: ListenHistoryStore
     private var task: Task<Void, Never>?
     private var explainTasks: [String: Task<Void, Never>] = [:]
 
-    init(client: TransformClient = TalkeoTransformClient(), history: HistoryStore = LocalHistoryStore.shared) {
+    init(
+        client: TransformClient = TalkeoTransformClient(),
+        history: HistoryStore = LocalHistoryStore.shared,
+        listenHistory: ListenHistoryStore = LocalListenHistoryStore.shared
+    ) {
         self.client = client
         self.history = history
+        self.listenHistory = listenHistory
     }
 
     func translate(_ text: String) {
         task?.cancel()
         clearSelection()
+        TTSAudioPlayer.shared.stop() // don't leave a Listen clip playing under a new mode
         // Animated: `sourceCard` is one persistent view bound to `sourceText`
         // (see `QuickTranslateView`) that just becomes read-only here, so this
         // transition updates it in place instead of swapping the view tree.
@@ -532,12 +568,58 @@ final class QuickTranslateModel: ObservableObject {
     func listen(_ text: String) {
         task?.cancel()
         clearSelection()
-        mode = .listen
-        sourceEditing = false
-        sourceText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        detectedLang = QuickTranslateModel.detectLanguage(sourceText)
+        // Animated: mirrors `translate(_:)`, so leaving the compose/history view
+        // for a playing clip transitions instead of popping.
+        withAnimation(.easeInOut(duration: 0.22)) {
+            mode = .listen
+            listenComposing = false
+            sourceEditing = false
+            sourceText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            detectedLang = QuickTranslateModel.detectLanguage(sourceText)
+        }
         guard !sourceText.isEmpty else { return }
+        recordListenHistory()
         playFull()
+    }
+
+    /// Switch Listen into its compose/history view (Listen tapped with nothing
+    /// selected): an empty, editable text box plus recent entries. Mirrors
+    /// `showHistory()`, but keeps `mode == .listen` — `listenComposing` is what
+    /// picks the compose view over the playback transport.
+    func showListenHistory() {
+        task?.cancel()
+        clearSelection()
+        TTSAudioPlayer.shared.stop() // don't leave a clip playing under the compose view
+        sourceEditing = false
+        sourceText = ""
+        mode = .listen
+        listenComposing = true
+        listenHistoryEntries = listenHistory.all()
+    }
+
+    /// Save the text locally so it can be replayed later. Recorded eagerly (on
+    /// open, not gated on the TTS fetch succeeding) — simpler than threading a
+    /// completion signal through `TTSAudioPlayer`, at the cost of a failed
+    /// lookup still showing up in history.
+    private func recordListenHistory() {
+        let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        listenHistory.add(ListenHistoryEntry(
+            id: UUID().uuidString,
+            text: text,
+            detectedLang: detectedLang,
+            timestamp: Date()
+        ))
+    }
+
+    func deleteListenHistory(_ entry: ListenHistoryEntry) {
+        listenHistory.remove(id: entry.id)
+        listenHistoryEntries = listenHistory.all()
+    }
+
+    func clearListenHistory() {
+        listenHistory.clear()
+        listenHistoryEntries = []
     }
 
     /// Load + play the whole text through the real TTS voice.
@@ -596,6 +678,7 @@ final class QuickTranslateModel: ObservableObject {
     func improve(_ text: String, targetIsTerminal: Bool = false) {
         task?.cancel()
         clearSelection()
+        TTSAudioPlayer.shared.stop() // don't leave a Listen clip playing under a new mode
         mode = .improve
         sourceEditing = false
         self.targetIsTerminal = targetIsTerminal
@@ -733,6 +816,7 @@ final class QuickTranslateModel: ObservableObject {
     func showHistory() {
         task?.cancel()
         clearSelection()
+        TTSAudioPlayer.shared.stop() // don't leave a Listen clip playing under a new mode
         sourceEditing = false
         sourceText = ""
         targetText = ""
@@ -1356,30 +1440,100 @@ struct QuickTranslateView: View {
 
     // MARK: Listen (TTS playback + select-to-hear, no explanations)
 
+    /// Compose/history (nothing loaded yet) vs. playback (a text is loaded and
+    /// playing/paused) — mirrors Translate's persistent-card pattern: one mode,
+    /// one section that mutates, picked by `listenComposing` rather than
+    /// `sourceText.isEmpty` (see that flag's doc comment for why).
     @ViewBuilder
     private var listenView: some View {
-        // Header.
+        if model.listenComposing {
+            listenComposeSection
+        } else {
+            listenPlaybackSection
+        }
+    }
+
+    /// Listen tapped with nothing selected: an empty, editable box (type or
+    /// paste text to hear it) plus recent entries — same shape as Translate's
+    /// History mode.
+    @ViewBuilder
+    private var listenComposeSection: some View {
         HStack {
             cardLabel("Listen")
             Spacer()
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Palette.muted)
-                    .frame(width: 20, height: 20)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .handCursor()
+            listenCloseButton
         }
+        .frame(height: 26)
+
+        ZStack(alignment: .topLeading) {
+            SelectableText(
+                text: model.sourceText,
+                height: $sourceHeight,
+                width: QuickTranslateView.cardTextWidth,
+                maxHeight: QuickTranslateView.textBoxMaxHeight,
+                minHeight: QuickTranslateView.textBoxMinHeight,
+                isEditable: true,
+                onTextChange: { model.sourceText = $0 },
+                onCommit: {
+                    let trimmed = model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    model.listen(trimmed)
+                }
+            ) { _, _ in }
+            .frame(height: sourceHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if model.sourceText.isEmpty {
+                Text("Type or paste text to listen to…")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Palette.tertiary)
+                    .allowsHitTesting(false)
+            }
+        }
+        .cardChrome()
+
+        if !model.listenHistoryEntries.isEmpty {
+            Divider().overlay(Palette.border).opacity(0.5)
+            cardLabel("Recent")
+
+            let recent = Array(model.listenHistoryEntries.prefix(QuickTranslateView.recentHistoryCount))
+            VStack(spacing: 0) {
+                ForEach(recent) { entry in
+                    ListenHistoryRow(
+                        entry: entry,
+                        onOpen: { model.listen(entry.text) },
+                        onDelete: { model.deleteListenHistory(entry) }
+                    )
+                }
+            }
+        }
+    }
+
+    /// A text is loaded: the karaoke-highlighted pane, the transport, and
+    /// (once a word's been picked) its pager footer.
+    @ViewBuilder
+    private var listenPlaybackSection: some View {
+        HStack {
+            cardLabel("Listen")
+            Spacer()
+            listenCloseButton
+        }
+        .frame(height: 26)
 
         // The text — tap a word to jump the playhead there; the word being
         // spoken is highlighted as it plays (its own observing subview, so it
         // refreshes per word, not on the 60 fps progress ticks).
         ListenTextPane(model: model, height: $sourceHeight)
+            .cardChrome()
 
         // Transport: play / pause / stop, a seekable timeline, and speed.
         ListenTransport(model: model)
+
+        // Make the tap-to-jump gesture discoverable, same spirit as
+        // Translate's `selectHint` — only until the user's picked a word once.
+        if model.terms.isEmpty {
+            listenHint
+        }
 
         // The currently-selected word: page with ‹ › (each jumps the playhead).
         if let term = model.activeTerm {
@@ -1405,6 +1559,32 @@ struct QuickTranslateView: View {
                 removeButton { model.removeActiveListen() }
             }
         }
+    }
+
+    /// Consistent close-button chrome — matches `sourceCardSection`'s (26×26
+    /// circle over `Palette.elevated`), shared by both Listen sub-states.
+    private var listenCloseButton: some View {
+        Button(action: onClose) {
+            Image(systemName: "xmark")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(Palette.muted)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Palette.elevated))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .handCursor()
+    }
+
+    private var listenHint: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "hand.tap")
+                .font(.system(size: 10, weight: .medium))
+            Text("Tap any word to jump there")
+                .font(.system(size: 11))
+        }
+        .foregroundStyle(Palette.tertiary)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     /// ‹ 1/2 › pager over the selected fragments (plays each as you page).
@@ -1812,12 +1992,14 @@ struct QuickTranslateView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
 
-    private func shimmerBar(width: CGFloat, height: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: 4, style: .continuous)
-            .fill(Palette.elevated)
-            .frame(width: width, height: height)
-    }
+/// Shared shimmer shape (top-level so both `QuickTranslateView` and
+/// `ListenTransport` — a separate type — can use it).
+private func shimmerBar(width: CGFloat, height: CGFloat) -> some View {
+    RoundedRectangle(cornerRadius: 4, style: .continuous)
+        .fill(Palette.elevated)
+        .frame(width: width, height: height)
 }
 
 // MARK: - Explain card view
@@ -2409,6 +2591,53 @@ private struct HistoryRow: View {
     }
 }
 
+/// Same shape as `HistoryRow`, minus the `source → target` pair — a Listen
+/// entry has no translation, just the text that was spoken.
+private struct ListenHistoryRow: View {
+    let entry: ListenHistoryEntry
+    let onOpen: () -> Void
+    let onDelete: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: onOpen) {
+            Text(entry.text)
+                .foregroundColor(Palette.muted)
+                .font(.system(size: 13))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.vertical, 7)
+                .padding(.horizontal, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(hover ? Palette.elevated.opacity(0.3) : Color.clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .handCursor()
+        .help(HistoryRow.relative(entry.timestamp))
+        .overlay(alignment: .trailing) {
+            if hover {
+                Button(action: onDelete) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Palette.muted)
+                        .frame(width: 18, height: 18)
+                        .background(Circle().fill(Palette.elevated))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Remove")
+                .handCursor()
+                .padding(.trailing, 2)
+            }
+        }
+        .onHover { hover = $0 }
+    }
+}
+
 /// The Listen text, in its own subview so it can observe the spoken word (a few
 /// updates per second) and highlight it karaoke-style without re-rendering the
 /// whole popover on every progress tick. Tapping a word jumps the playhead there.
@@ -2463,7 +2692,11 @@ private struct ListenTransport: View {
                 speed
             }
             if loading {
-                caption("Loading the voice…")
+                // Shimmer, not a flat caption: the controls above are already in
+                // their final shape while loading (only enabled-ness changes),
+                // so this just borrows Translate's "in progress" language for
+                // the one bit of text that does change.
+                shimmerBar(width: 130, height: 11)
             } else if failed {
                 caption("Couldn't load the voice — tap ↻ to retry.")
             }
