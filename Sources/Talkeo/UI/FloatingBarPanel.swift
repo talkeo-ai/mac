@@ -500,6 +500,20 @@ private struct BarButtonFramesKey: PreferenceKey {
     }
 }
 
+private extension View {
+    /// Report this control's frame + label so the panel scopes the hand
+    /// cursor to it and anchors its hover tip — what makes a bar control
+    /// *feel* like a button. Anything clickable in the bar must opt in.
+    func reportsAsBarButton(_ label: String) -> some View {
+        background(GeometryReader { geo in
+            Color.clear.preference(
+                key: BarButtonFramesKey.self,
+                value: [BarButtonInfo(label: label, frame: geo.frame(in: .named(FloatingBarView.spaceName)))]
+            )
+        })
+    }
+}
+
 struct FloatingBarView: View {
     @ObservedObject var model: FloatingBarModel
     var onOpenApp: () -> Void = {}
@@ -512,14 +526,11 @@ struct FloatingBarView: View {
 
     private var stack: some View {
         VStack(spacing: 5) {
-            Button(action: onOpenApp) {
-                FloatingBrandIcon()
-                    .frame(width: 20, height: 20)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .help("Open Talkeo")
-            .padding(.bottom, 1)
+            // Same affordances as every other bar control (hover ring, hand
+            // cursor, tip) — without them the brand icon didn't read as
+            // clickable at all.
+            BrandButton(action: onOpenApp)
+                .padding(.bottom, 1)
 
             // Translate, Improve and Listen all act on the selection, so they light
             // up when there's text to work with. Capture (OCR) doesn't depend on it.
@@ -612,15 +623,29 @@ private struct BarButton: View {
         // Highlight only — the hand cursor is owned by FloatingBarPanel.syncCursor,
         // and the custom hover tip replaces the native .help tag.
         .onHover { isHover = $0 }
-        // Report where this button sits (and its label) so the hand cursor and
-        // the hover tip apply exactly here.
-        .background(GeometryReader { geo in
-            Color.clear.preference(
-                key: BarButtonFramesKey.self,
-                value: [BarButtonInfo(label: help, frame: geo.frame(in: .named(FloatingBarView.spaceName)))]
-            )
-        })
+        .reportsAsBarButton(help)
         .animation(.easeOut(duration: 0.18), value: isActive)
+    }
+}
+
+/// The bar's Talkeo button (opens the main app): the brand PNG in place of an
+/// SF glyph, in the same 30pt circle with the same hover ring and tip plumbing
+/// as `BarButton`, so it reads as clickable like the rest of the column.
+private struct BrandButton: View {
+    let action: () -> Void
+    @State private var isHover = false
+
+    var body: some View {
+        Button(action: action) {
+            FloatingBrandIcon()
+                .frame(width: 20, height: 20)
+                .frame(width: 30, height: 30)
+                .contentShape(Circle())
+                .background(Circle().fill(isHover ? Color.primary.opacity(0.10) : Color.clear))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHover = $0 }
+        .reportsAsBarButton("Open Talkeo")
     }
 }
 

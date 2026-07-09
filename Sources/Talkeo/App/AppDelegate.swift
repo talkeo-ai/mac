@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainWindow: MainWindowController!
     private let reader = SelectionReader()
     private let permission = AccessibilityPermission()
+    private let settings: SettingsStore = LocalSettingsStore.shared
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Compact translate + learn popover. (The selection tooltip still exists
@@ -32,6 +33,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // "Full history" in the popover opens the app's Translate view with its
         // history drawer open.
         quickTranslate.onOpenFullHistory = { [weak self] in self?.mainWindow.openTranslateHistory() }
+        // Restore persisted preferences before the first show, so an auto-hiding
+        // bar starts retracted instead of flashing revealed.
+        floatingBar.setAutoHide(settings.barAutoHide)
         floatingBar.show()
 
         statusBar = StatusBarController(
@@ -42,7 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             isAutoHide: { [weak self] in self?.floatingBar.isAutoHide ?? false },
             toggleAutoHide: { [weak self] in
                 guard let self else { return }
-                self.floatingBar.setAutoHide(!self.floatingBar.isAutoHide)
+                let value = !self.floatingBar.isAutoHide
+                self.floatingBar.setAutoHide(value)
+                self.settings.barAutoHide = value
             },
             quit: { NSApp.terminate(nil) }
         )
@@ -103,9 +109,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Reads the selection in the frontmost app and, if any, opens the quick
     /// translation popover. The bar has no captured text, so it reads on demand.
     private func translateCurrentSelection() {
-        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier {
-            return
-        }
         reader.readSelectedText { [weak self] text in
             guard let self else { return }
             if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -121,9 +124,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// popover. Improve needs text, so with nothing selected it's a no-op.
     private func improveCurrentSelection() {
         let frontmost = NSWorkspace.shared.frontmostApplication
-        if frontmost?.bundleIdentifier == Bundle.main.bundleIdentifier {
-            return
-        }
         // Capture terminal-ness now (the frontmost app owns the selection); it
         // turns Replace into a safe Copy since terminals can't be edited in place.
         let isTerminal = SelectionReplacer.isTerminal(frontmost)
@@ -138,9 +138,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Reads the selection in the frontmost app and, if any, opens the listen
     /// (TTS) popover. Listen needs text, so with nothing selected it's a no-op.
     private func listenCurrentSelection() {
-        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier {
-            return
-        }
         reader.readSelectedText { [weak self] text in
             guard let self else { return }
             if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
