@@ -615,10 +615,14 @@ private struct TranslatePage: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// Compact centered cluster: source chip · swap · target chip.
+    /// Source chip · swap · target chip. The swap is pinned to the column's
+    /// exact center — the gutter between the two panes — via equal flexible
+    /// halves; centering the cluster as a whole would drift it with the chips'
+    /// widths ("Detect language" is wider than "English").
     private var languageBar: some View {
         HStack(spacing: 10) {
             sourceMenu
+                .frame(maxWidth: .infinity, alignment: .trailing)
 
             Button(action: { model.swap() }) {
                 Image(systemName: "arrow.left.arrow.right")
@@ -632,6 +636,7 @@ private struct TranslatePage: View {
             .help("Swap languages")
 
             targetMenu
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
