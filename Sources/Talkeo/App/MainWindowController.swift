@@ -159,9 +159,11 @@ enum MainSection: String, CaseIterable, Identifiable {
 // MARK: - Root view (SPA: icon rail + floating content card)
 
 /// Shared navigation state: the controller writes it for deep-links, the rail
-/// writes it on clicks, the detail pane reads it.
+/// writes it on clicks, the detail pane reads it. Owns the per-section models
+/// that should survive switching sections (e.g. the translator keeps its text).
 final class MainWindowModel: ObservableObject {
     @Published var selection: MainSection = .translate
+    let translate = TranslatePageModel()
 }
 
 struct MainWindowView: View {
@@ -246,7 +248,7 @@ struct MainWindowView: View {
                 comingSoon: true
             )
         case .translate:
-            TranslatePage()
+            TranslatePage(model: model.translate)
         case .improve:
             ToolPage(
                 section: .improve,
@@ -391,97 +393,417 @@ private struct StepsList: View {
 
 // MARK: - Translate
 
-/// The translate tool page: how it works plus the local translation history
-/// (the history lives here, where it's produced — Transcript is a different,
-/// future feature: real-time transcription).
+/// State for the in-app translator. Mirrors the popover's flow (detect EN/ES,
+/// stream deltas, record history) but is its own model: text is typed rather
+/// than captured, translation re-runs debounced as you type, and the language
+/// pair can be pinned manually (the popover always auto-detects). Owned by
+/// `MainWindowModel` so switching sections doesn't lose the text.
+final class TranslatePageModel: ObservableObject {
+    /// Explicit language pair override; `nil` = auto-detect per translation.
+    @Published var pinnedSource: String?
+    /// Detected source ("EN"/"ES") of the last translation, for the Auto chip.
+    @Published private(set) var detected: String?
+    @Published var sourceText = ""
+    @Published private(set) var outputText = ""
+    @Published private(set) var isStreaming = false
+    @Published private(set) var errorMessage: String?
+    @Published private(set) var entries: [HistoryEntry] = []
+
+    private let client: TransformClient
+    private let history: HistoryStore
+    private var streamTask: Task<Void, Never>?
+    private var debounceTask: Task<Void, Never>?
+    /// Invalidates in-flight tasks when a newer translation supersedes them.
+    private var generation = 0
+
+    init(client: TransformClient = TalkeoTransformClient(), history: HistoryStore = LocalHistoryStore.shared) {
+        self.client = client
+        self.history = history
+    }
+
+    /// Source of the *next* translation: pinned, else last detection, else ES
+    /// (the placeholder direction — the user's language into English).
+    var effectiveSource: String { pinnedSource ?? detected ?? "ES" }
+    var targetLang: String { effectiveSource == "EN" ? "ES" : "EN" }
+
+    var sourceChipLabel: String {
+        if let pinnedSource { return QuickTranslateModel.languageName(pinnedSource) }
+        if let detected { return "Auto · \(QuickTranslateModel.languageName(detected))" }
+        return "Detect language"
+    }
+
+    var targetChipLabel: String { QuickTranslateModel.languageName(targetLang) }
+
+    /// Debounced translate-as-you-type, Google Translate style.
+    func sourceEdited() {
+        debounceTask?.cancel()
+        let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            reset(keepText: true)
+            return
+        }
+        debounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            self?.translateNow()
+        }
+    }
+
+    func translateNow() {
+        debounceTask?.cancel()
+        streamTask?.cancel()
+        generation += 1
+        let gen = generation
+
+        let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+
+        let src = pinnedSource ?? QuickTranslateModel.detectLanguage(text)
+        let tgt = src == "EN" ? "ES" : "EN"
+        detected = pinnedSource == nil ? src : nil
+        errorMessage = nil
+        outputText = ""
+        isStreaming = true
+
+        let stream = client.translate(text: text, sourceLang: src, targetLang: tgt)
+        streamTask = Task { @MainActor [weak self] in
+            do {
+                for try await delta in stream {
+                    guard let self, self.generation == gen else { return }
+                    self.outputText += delta
+                }
+                guard let self, self.generation == gen else { return }
+                self.isStreaming = false
+                self.record(source: text, sourceLang: src, targetLang: tgt)
+            } catch {
+                guard let self, self.generation == gen else { return }
+                self.isStreaming = false
+                self.errorMessage = QuickTranslateModel.message(error)
+            }
+        }
+    }
+
+    /// Swap the pair. Like Google Translate, the last translation becomes the
+    /// new input so the swap is immediately useful.
+    func swap() {
+        let newSource = targetLang
+        pinnedSource = newSource
+        detected = nil
+        if !outputText.isEmpty { sourceText = outputText }
+        translateNow()
+    }
+
+    func pinSource(_ lang: String?) {
+        pinnedSource = lang
+        translateNow()
+    }
+
+    func pinTarget(_ lang: String) {
+        pinSource(lang == "EN" ? "ES" : "EN")
+    }
+
+    /// Load a history entry back into the translator (no re-request).
+    func select(_ entry: HistoryEntry) {
+        debounceTask?.cancel()
+        streamTask?.cancel()
+        generation += 1
+        pinnedSource = nil
+        detected = entry.detectedLang
+        sourceText = entry.source
+        outputText = entry.target
+        isStreaming = false
+        errorMessage = nil
+    }
+
+    func refreshHistory() {
+        entries = history.all()
+    }
+
+    private func reset(keepText: Bool) {
+        streamTask?.cancel()
+        generation += 1
+        if !keepText { sourceText = "" }
+        outputText = ""
+        detected = nil
+        isStreaming = false
+        errorMessage = nil
+    }
+
+    func clear() { reset(keepText: false) }
+
+    private func record(source: String, sourceLang: String, targetLang: String) {
+        guard !outputText.isEmpty else { return }
+        history.add(HistoryEntry(
+            id: UUID().uuidString,
+            source: source,
+            target: outputText,
+            detectedLang: sourceLang,
+            translateLang: targetLang,
+            timestamp: Date()
+        ))
+        refreshHistory()
+    }
+}
+
+/// The in-app translator: Google Translate distilled — language chips with a
+/// swap in between, side-by-side source/translation panes, translate-as-you-
+/// type, and the local history underneath (rows load back into the panes).
 private struct TranslatePage: View {
-    @State private var entries: [HistoryEntry] = []
+    @ObservedObject var model: TranslatePageModel
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-                PageHeader(
-                    section: .translate,
-                    subtitle: "Instant translation of whatever you select, in any app."
-                )
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Translate")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(Palette.foreground)
+                    .padding(.bottom, 4)
 
-                StepsList(steps: [
-                    "Select text anywhere — browser, editor, terminal.",
-                    "Click the translate button in the floating bar.",
-                    "Read the translation in place; it's saved to your history."
-                ])
+                languageBar
 
-                Text("History".uppercased())
-                    .font(.system(size: 11, weight: .bold))
-                    .kerning(1.1)
-                    .foregroundStyle(Palette.tertiary)
-                    .padding(.top, 8)
+                HStack(alignment: .top, spacing: 14) {
+                    sourcePane
+                    outputPane
+                }
 
-                if entries.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Nothing here yet")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(Palette.foreground)
-                        Text("Translations you make from the floating bar will show up here.")
-                            .font(.system(size: 14))
-                            .foregroundStyle(Palette.muted)
-                    }
-                    .padding(20)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Palette.elevated)
-                    )
-                } else {
+                if !model.entries.isEmpty {
+                    Text("History".uppercased())
+                        .font(.system(size: 11, weight: .bold))
+                        .kerning(1.1)
+                        .foregroundStyle(Palette.tertiary)
+                        .padding(.top, 16)
+
                     VStack(alignment: .leading, spacing: 10) {
-                        ForEach(entries) { entry in
-                            HistoryRow(entry: entry)
+                        ForEach(model.entries) { entry in
+                            HistoryRow(entry: entry) { model.select(entry) }
                         }
                     }
                 }
             }
-            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: 920, alignment: .leading)
             .padding(.horizontal, 56)
-            .padding(.top, 56)
+            .padding(.top, 48)
             .padding(.bottom, 48)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .onAppear { entries = LocalHistoryStore.shared.all() }
+        .onAppear { model.refreshHistory() }
+        // Cmd+Return forces an immediate translation (skips the debounce).
+        .background(
+            Button("") { model.translateNow() }
+                .keyboardShortcut(.return, modifiers: .command)
+                .hidden()
+        )
+    }
+
+    private var languageBar: some View {
+        HStack(spacing: 12) {
+            Menu {
+                Button("Detect language") { model.pinSource(nil) }
+                Button("English") { model.pinSource("EN") }
+                Button("Spanish") { model.pinSource("ES") }
+            } label: {
+                LangChip(text: model.sourceChipLabel)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+
+            Button(action: { model.swap() }) {
+                Image(systemName: "arrow.left.arrow.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Palette.muted)
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(Palette.elevated))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Swap languages")
+
+            Menu {
+                Button("English") { model.pinTarget("EN") }
+                Button("Spanish") { model.pinTarget("ES") }
+            } label: {
+                LangChip(text: model.targetChipLabel)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var sourcePane: some View {
+        ZStack(alignment: .topLeading) {
+            TextEditor(text: $model.sourceText)
+                .font(.system(size: 16))
+                .lineSpacing(4)
+                .scrollContentBackground(.hidden)
+                .padding(12)
+                .onChange(of: model.sourceText) { _ in model.sourceEdited() }
+
+            if model.sourceText.isEmpty {
+                Text("Type or paste text…")
+                    .font(.system(size: 16))
+                    .foregroundStyle(Palette.tertiary)
+                    .padding(.top, 12)
+                    .padding(.leading, 17)
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 240, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Palette.elevated)
+        )
+        .overlay(alignment: .topTrailing) {
+            if !model.sourceText.isEmpty {
+                PaneIconButton(system: "xmark", help: "Clear") { model.clear() }
+                    .padding(8)
+            }
+        }
+    }
+
+    private var outputPane: some View {
+        ZStack(alignment: .topLeading) {
+            if let error = model.errorMessage {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(error)
+                        .font(.system(size: 14))
+                        .foregroundStyle(Palette.muted)
+                    Button("Try again") { model.translateNow() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Palette.foreground)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Capsule().stroke(Palette.border, lineWidth: 1))
+                }
+                .padding(17)
+            } else if model.outputText.isEmpty {
+                if model.isStreaming {
+                    ProgressView()
+                        .controlSize(.small)
+                        .padding(17)
+                } else {
+                    Text("Translation")
+                        .font(.system(size: 16))
+                        .foregroundStyle(Palette.tertiary)
+                        .padding(17)
+                }
+            } else {
+                ScrollView {
+                    Text(model.outputText)
+                        .font(.system(size: 16))
+                        .lineSpacing(4)
+                        .foregroundStyle(Palette.foreground)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .padding(17)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 240, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Palette.elevated)
+        )
+        .overlay(alignment: .bottomTrailing) {
+            if !model.outputText.isEmpty && !model.isStreaming {
+                CopyButton(text: model.outputText)
+                    .padding(8)
+            }
+        }
     }
 }
 
-private struct HistoryRow: View {
-    let entry: HistoryEntry
+private struct LangChip: View {
+    let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(entry.source)
-                .font(.system(size: 14, weight: .semibold))
+        HStack(spacing: 5) {
+            Text(text)
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Palette.foreground)
-                .lineLimit(2)
-            Text(entry.target)
-                .font(.system(size: 14))
-                .foregroundStyle(Palette.muted)
-                .lineLimit(2)
-            HStack(spacing: 10) {
-                Text("\(entry.detectedLang.uppercased()) → \(entry.translateLang.uppercased())")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Palette.muted)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().stroke(Palette.border, lineWidth: 1))
-                Text(entry.timestamp.formatted(date: .abbreviated, time: .shortened))
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.tertiary)
-            }
-            .padding(.top, 2)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Palette.tertiary)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Palette.elevated)
-        )
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Capsule().fill(Palette.elevated))
+        .contentShape(Capsule())
+    }
+}
+
+/// Small quiet icon button used inside the panes (clear, copy).
+private struct PaneIconButton: View {
+    let system: String
+    let help: String
+    let action: () -> Void
+    @State private var isHover = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(isHover ? Palette.foreground : Palette.muted)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(isHover ? Palette.surface : Color.clear))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHover = $0 }
+        .help(help)
+    }
+}
+
+private struct CopyButton: View {
+    let text: String
+    @State private var copied = false
+
+    var body: some View {
+        PaneIconButton(system: copied ? "checkmark" : "doc.on.doc", help: "Copy translation") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            copied = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
+        }
+    }
+}
+
+/// One history entry; clicking it loads the pair back into the translator.
+private struct HistoryRow: View {
+    let entry: HistoryEntry
+    let action: () -> Void
+    @State private var isHover = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(entry.source)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Palette.foreground)
+                    .lineLimit(1)
+                Text(entry.target)
+                    .font(.system(size: 14))
+                    .foregroundStyle(Palette.muted)
+                    .lineLimit(1)
+            }
+            .padding(.vertical, 12)
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isHover ? Palette.elevated : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Palette.border, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHover = $0 }
+        .help("\(entry.detectedLang.uppercased()) → \(entry.translateLang.uppercased()) · \(entry.timestamp.formatted(date: .abbreviated, time: .shortened))")
     }
 }
 
