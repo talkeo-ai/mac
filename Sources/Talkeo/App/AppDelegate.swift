@@ -109,9 +109,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Reads the selection in the frontmost app and, if any, opens the quick
     /// translation popover. The bar has no captured text, so it reads on demand.
     private func translateCurrentSelection() {
-        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier {
-            return
-        }
         reader.readSelectedText { [weak self] text in
             guard let self else { return }
             if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -127,9 +124,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// popover. Improve needs text, so with nothing selected it's a no-op.
     private func improveCurrentSelection() {
         let frontmost = NSWorkspace.shared.frontmostApplication
-        if frontmost?.bundleIdentifier == Bundle.main.bundleIdentifier {
-            return
-        }
         // Capture terminal-ness now (the frontmost app owns the selection); it
         // turns Replace into a safe Copy since terminals can't be edited in place.
         let isTerminal = SelectionReplacer.isTerminal(frontmost)
@@ -144,9 +138,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Reads the selection in the frontmost app and, if any, opens the listen
     /// (TTS) popover. Listen needs text, so with nothing selected it's a no-op.
     private func listenCurrentSelection() {
-        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier {
-            return
-        }
         reader.readSelectedText { [weak self] text in
             guard let self else { return }
             if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
