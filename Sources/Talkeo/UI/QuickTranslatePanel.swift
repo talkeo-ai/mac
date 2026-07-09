@@ -1748,7 +1748,8 @@ private struct SelectableText: NSViewRepresentable {
         guard let layoutManager = textView.layoutManager, let container = textView.textContainer else {
             return height(of: textView.string, width: width)
         }
-        container.containerSize = NSSize(width: max(width, 1), height: .greatestFiniteMagnitude)
+        // Container width is already set by the caller (`updateNSView`), the
+        // single source of truth — just measure against it.
         layoutManager.ensureLayout(for: container)
         let used = layoutManager.usedRect(for: container)
         return ceil(used.height) + textView.textContainerInset.height * 2
@@ -1774,7 +1775,14 @@ private struct SelectableText: NSViewRepresentable {
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.lineFragmentPadding = 0
-        textView.textContainer?.widthTracksTextView = true
+        // We set the container's width ourselves every `updateNSView` pass
+        // (below), from the same `width` SwiftUI lays this view out at.
+        // Leaving `widthTracksTextView` on too means AppKit's own auto-sync
+        // (driven by the NSTextView's *actual* frame, which can briefly lag
+        // behind during a panel resize) fights our explicit value — a one-frame
+        // mismatch there re-wraps the text at the wrong width, changes the
+        // measured height, and shows up as a visible pop before it corrects.
+        textView.textContainer?.widthTracksTextView = false
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.delegate = context.coordinator
 
@@ -1811,6 +1819,9 @@ private struct SelectableText: NSViewRepresentable {
         coordinator.onSelect = onSelect
         coordinator.onTextChange = onTextChange
         coordinator.onCommit = onCommit
+
+        // Single source of truth for the container's width (see `makeNSView`).
+        textView.textContainer?.containerSize = NSSize(width: max(width, 1), height: .greatestFiniteMagnitude)
 
         textView.isEditable = isEditable
         if textView.string != text {
