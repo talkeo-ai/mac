@@ -871,11 +871,12 @@ struct QuickTranslateView: View {
     /// Tighter cap while an explain card is open below the two panes, so the
     /// card always fits without pushing the popover past the window's max
     /// height (both panes stay visible — the card must never cost you the
-    /// translation). Budget: 2×(header 26 + box ≤88 + chrome 20) + explain
-    /// card ≤ explainMaxHeight + paddings ≈ 600 = the panel cap.
+    /// translation). Worst-case budget: 2×(header 26 + box ≤88 + chrome 20)
+    /// + dividers + 14pt gaps + explainMaxHeight + 32 padding ≈ 598, just
+    /// under the panel's 600 cap.
     static let textBoxMaxHeightWithCard: CGFloat = 88
     /// Cap for the explain card; taller cards scroll internally.
-    static let explainMaxHeight: CGFloat = 250
+    static let explainMaxHeight: CGFloat = 220
 
     /// Live cap for both text panes — tightens while a term's card is open.
     private var textBoxCap: CGFloat {
@@ -932,25 +933,18 @@ struct QuickTranslateView: View {
 
     static let width: CGFloat = 400
 
-    // MARK: A language pane (detected on top, translation below) — selectable
+    // MARK: The translation pane (the source pane is `sourceCard`)
 
     @ViewBuilder
-    private func paneView(_ pane: QuickTranslateModel.Pane, withClose: Bool, height: Binding<CGFloat>) -> some View {
+    private func paneView(_ pane: QuickTranslateModel.Pane, height: Binding<CGFloat>) -> some View {
         let isSource = pane == .source
         let text = isSource ? model.sourceText : model.targetText
         let isEnglish = model.language(for: pane) == "EN"
-        let editing = isSource && model.sourceEditing
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 cardLabel(QuickTranslateModel.languageName(model.language(for: pane)))
                 Spacer()
-                // Edit the detected text (pencil), or confirm it (checkmark).
-                if isSource {
-                    QuickIconButton(system: editing ? "checkmark" : "pencil") {
-                        if model.sourceEditing { model.commitEdit() } else { model.beginEdit() }
-                    }
-                }
-                if !text.isEmpty, !editing {
+                if !text.isEmpty {
                     // Listen only for English — never read the Spanish side aloud.
                     if isEnglish {
                         QuickIconButton(system: "speaker.wave.2") {
@@ -963,21 +957,10 @@ struct QuickTranslateView: View {
                         pb.setString(text, forType: .string)
                     }
                 }
-                if withClose {
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(Palette.muted)
-                            .frame(width: 20, height: 20)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .handCursor()
-                }
             }
             // Reserve the icon-row height even while there are no icons yet
-            // (target pane while streaming), and fade them in when the text
-            // lands — otherwise their appearance pushes the card down.
+            // (streaming), and fade them in when the text lands — otherwise
+            // their appearance pushes the card down.
             .frame(height: 26)
             .animation(.easeOut(duration: 0.2), value: text.isEmpty)
             paneText(pane, height: height)
@@ -1135,7 +1118,7 @@ struct QuickTranslateView: View {
             }
         } else if !model.sourceEditing {
             Divider().overlay(Palette.border).opacity(0.6)
-            paneView(.target, withClose: false, height: $targetHeight)
+            paneView(.target, height: $targetHeight)
 
             if model.activeTerm != nil {
                 Divider().overlay(Palette.border).opacity(0.6)
