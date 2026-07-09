@@ -1697,6 +1697,9 @@ private struct SelectableText: NSViewRepresentable {
     /// Cap the box height; past it the text scrolls internally instead of growing
     /// the popover off-screen.
     var maxHeight: CGFloat = .greatestFiniteMagnitude
+    /// Floor the box height (e.g. a compose input that shouldn't look like a
+    /// cramped single line while empty).
+    var minHeight: CGFloat = 0
     /// Persistent markers for the words already picked, and which one is focused.
     var highlights: [(range: NSRange, active: Bool)] = []
     /// Override the marker fill (e.g. a red diff tint for Improve). Defaults to
@@ -1806,10 +1809,11 @@ private struct SelectableText: NSViewRepresentable {
         textView.spokenMarker = (isEditable ? nil : spokenRange).flatMap { NSMaxRange($0) <= length ? $0 : nil }
         textView.needsDisplay = true
 
-        // Deterministic content height (text + width), capped — past the cap the
-        // scroll view takes over instead of the popover growing off-screen.
+        // Deterministic content height (text + width), floored and capped — past
+        // the cap the scroll view takes over instead of the popover growing
+        // off-screen.
         let full = SelectableText.height(of: text, width: width)
-        let target = min(full, maxHeight)
+        let target = min(max(full, minHeight), maxHeight)
         scroll.hasVerticalScroller = full > maxHeight + 0.5
         if abs(target - height) > 0.5 {
             DispatchQueue.main.async { height = target }
@@ -1850,12 +1854,13 @@ private struct SelectableText: NSViewRepresentable {
         }
 
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-            // Enter confirms the edit instead of inserting a newline.
-            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-                onCommit()
-                return true
-            }
-            return false
+            // Enter confirms; Shift+Enter inserts a real line break instead —
+            // returning false here lets the text view's own default handling
+            // (a plain newline) run, same as any normal multi-line input.
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
+            if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { return false }
+            onCommit()
+            return true
         }
     }
 }
@@ -2029,26 +2034,43 @@ private struct HistoryRow: View {
 private struct HistoryComposeInput: View {
     let onSubmit: (String) -> Void
     @State private var text: String = ""
-    @FocusState private var focused: Bool
+    @State private var textHeight: CGFloat = HistoryComposeInput.minHeight
+
+    private static let minHeight: CGFloat = 52
+    private static let maxHeight: CGFloat = 140
+    /// Popover content width (368) minus this view's own horizontal padding —
+    /// `SelectableText` needs the exact laid-out width to size itself.
+    private static let textWidth: CGFloat = QuickTranslateView.width - 32 - 24
 
     var body: some View {
-        ZStack(alignment: .leading) {
+        ZStack(alignment: .topLeading) {
+            // Same underlying editor as the translate pane's edit-in-place box:
+            // wraps instead of scrolling sideways, grows with content, and past
+            // `maxHeight` scrolls internally. Auto-focuses itself (built into
+            // `SelectableText`), same as switching the translate pane into edit.
+            SelectableText(
+                text: text,
+                height: $textHeight,
+                width: Self.textWidth,
+                maxHeight: Self.maxHeight,
+                minHeight: Self.minHeight,
+                isEditable: true,
+                onTextChange: { text = $0 },
+                onCommit: {
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    onSubmit(trimmed)
+                    text = ""
+                }
+            ) { _, _ in }
+            .frame(height: textHeight)
+
             if text.isEmpty {
                 Text("Type or paste text to translate…")
                     .font(.system(size: 15))
                     .foregroundStyle(Palette.tertiary)
                     .allowsHitTesting(false)
             }
-            TextField("", text: $text)
-                .textFieldStyle(.plain)
-                .font(.system(size: 15))
-                .foregroundStyle(Palette.foreground)
-                .focused($focused)
-                .onSubmit {
-                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty else { return }
-                    onSubmit(trimmed)
-                }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -2058,9 +2080,8 @@ private struct HistoryComposeInput: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(focused ? Palette.muted.opacity(0.5) : Palette.border, lineWidth: 1)
+                .stroke(Palette.border, lineWidth: 1)
         )
-        .onAppear { focused = true }
     }
 }
 
