@@ -116,7 +116,15 @@ struct BarTooltipView: View {
         .opacity(appeared ? 1 : 0)
         .scaleEffect(appeared ? 1 : 0.95, anchor: .trailing) // grow out of the tail, toward the button
         .onAppear {
-            withAnimation(.easeOut(duration: 0.18)) { appeared = true }
+            // Deferred one run-loop turn: flipping the state during the first
+            // render pass races the initial commit — when both land in the
+            // same transaction there's no visible entrance at all, so tips
+            // popped in on fresh presentations (window just ordered front)
+            // while swaps between neighbouring buttons animated. One frame
+            // committed at the hidden state makes every path animate alike.
+            DispatchQueue.main.async {
+                withAnimation(.easeOut(duration: 0.18)) { appeared = true }
+            }
         }
     }
 }

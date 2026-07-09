@@ -481,7 +481,7 @@ private struct BarButton: View {
     let action: () -> Void
     @State private var isHover = false
 
-    private var fillColor: Color {
+    private var tint: Color {
         if isHover { return Color.primary.opacity(0.10) }
         if isActive { return Color.accentColor.opacity(0.14) }
         return Color.clear
@@ -494,7 +494,19 @@ private struct BarButton: View {
                 .foregroundStyle(isActive ? Color.accentColor : .primary)
                 .frame(width: 30, height: 30)
                 .contentShape(Circle())
-                .background(Circle().fill(fillColor))
+                .background(
+                    ZStack {
+                        // Near-solid neutral base under the active tint: the
+                        // glass refracts whatever sits behind the bar, and a
+                        // same-hue backdrop (e.g. the blue of a text
+                        // selection) washed the accent glyph out. The material
+                        // pins the chip's luminance to the appearance instead
+                        // of the backdrop — per the Liquid Glass guidance:
+                        // solid fills inside glass, never glass on glass.
+                        if isActive { Circle().fill(.thickMaterial) }
+                        Circle().fill(tint)
+                    }
+                )
         }
         .buttonStyle(.plain)
         // Ring highlight + hover report; the custom hover tip replaces the
