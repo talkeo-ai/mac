@@ -39,6 +39,14 @@ final class QuickTranslatePanel {
     private var dismissMonitor: Any?
     private var topAnchor: CGFloat = 0
     private var leftAnchor: CGFloat = 0
+    /// Deferred window shrink — see `resize(to:)`.
+    private var pendingShrink: DispatchWorkItem?
+
+    /// "Full history" tapped in the Translate/History view. Mirrors
+    /// `FloatingBarPanel.onOpenApp` — this panel doesn't know the main app
+    /// window exists; whoever owns both (`AppDelegate`) wires this to it once
+    /// that window can open to a specific section.
+    var onOpenFullHistory: (() -> Void)?
 
     /// Fires with `true` when the popover comes on screen and `false` once it
     /// leaves, whatever the path (dismiss click, close button, Replace). The
@@ -85,11 +93,13 @@ final class QuickTranslatePanel {
         var onResizeRef: ((CGSize) -> Void)?
         var onCloseRef: (() -> Void)?
         var onReplaceRef: ((String) -> Void)?
+        var onOpenFullHistoryRef: (() -> Void)?
         let view = QuickTranslateView(
             model: model,
             onResize: { onResizeRef?($0) },
             onClose: { onCloseRef?() },
-            onReplace: { onReplaceRef?($0) }
+            onReplace: { onReplaceRef?($0) },
+            onOpenFullHistory: { onOpenFullHistoryRef?() }
         )
         let hosting = FirstMouseHostingView(rootView: view)
         hosting.frame = NSRect(origin: .zero, size: NSSize(width: Self.width, height: Self.nominalHeight))
@@ -99,6 +109,7 @@ final class QuickTranslatePanel {
         onResizeRef = { [weak self] size in self?.resize(to: size) }
         onCloseRef = { [weak self] in self?.hide() }
         onReplaceRef = { [weak self] text in self?.performReplace(text) }
+        onOpenFullHistoryRef = { [weak self] in self?.onOpenFullHistory?() }
     }
 
     func show(text: String) {
@@ -156,6 +167,8 @@ final class QuickTranslatePanel {
     /// for ~140ms, so a fallback ⌘V could land here instead of the target app.
     private func closeImmediately() {
         removeDismissMonitor()
+        pendingShrink?.cancel()
+        pendingShrink = nil
         Speaker.stop() // never let playback outlive the popover
         TTSAudioPlayer.shared.stop()
         panel.orderOut(nil)
@@ -170,8 +183,14 @@ final class QuickTranslatePanel {
             previousApp = NSWorkspace.shared.frontmostApplication
         }
         computeAnchor()
-        let origin = NSPoint(x: leftAnchor, y: topAnchor - Self.nominalHeight)
-        panel.setFrame(NSRect(origin: origin, size: NSSize(width: Self.width, height: Self.nominalHeight)), display: true)
+        // Keep the current height when already visible — snapping down to the
+        // nominal height would clip content that's still animating (the next
+        // preference-driven `resize` settles it). Fresh presentations start at
+        // the nominal height as before.
+        pendingShrink?.cancel()
+        pendingShrink = nil
+        let height = panel.isVisible ? panel.frame.height : Self.nominalHeight
+        panel.setFrame(frame(forHeight: height), display: true)
         if !panel.isVisible {
             panel.alphaValue = 0
             panel.orderFrontRegardless()
@@ -196,6 +215,8 @@ final class QuickTranslatePanel {
 
     func hide() {
         removeDismissMonitor()
+        pendingShrink?.cancel()
+        pendingShrink = nil
         Speaker.stop() // never let playback outlive the popover
         TTSAudioPlayer.shared.stop()
         guard panel.isVisible, panel.alphaValue > 0 else { return }
@@ -235,13 +256,44 @@ final class QuickTranslatePanel {
 
     /// Resize to content height, growing downward from `topAnchor`, clamped to
     /// the screen so a long translation never spills off the bottom.
+    ///
+    /// The window must never be SMALLER than the content while the content is
+    /// mid-animation: the content's `withAnimation` transitions (0.22s) lag the
+    /// preference-reported target size, and a window already at the smaller
+    /// final size hard-clips the still-animating content — rows sliced off at
+    /// a square edge, no rounded corner (the rounding is SwiftUI's clipShape
+    /// on the content, not a native window shape). So: grow immediately, but
+    /// defer shrinks until the content animation has landed. The panel is
+    /// transparent and the chrome is drawn at content size, so the oversized
+    /// window in the interim is invisible.
+    ///
+    /// (Animating the window frame itself was tried and reverted — the corner
+    /// clip and vibrancy redraw lag the native resize and flash square.)
     private func resize(to size: CGSize) {
         let height = min(max(size.height, 56), Self.maxHeight)
+        pendingShrink?.cancel()
+        pendingShrink = nil
+        if height >= panel.frame.height - 0.5 {
+            panel.setFrame(frame(forHeight: height), display: true, animate: false)
+        } else {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.pendingShrink = nil
+                self.panel.setFrame(self.frame(forHeight: height), display: true, animate: false)
+            }
+            pendingShrink = work
+            // Slightly past the longest content animation (0.22s translate/open,
+            // 0.3s reveal), so the clip only ever trims transparent overhang.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.32, execute: work)
+        }
+    }
+
+    private func frame(forHeight height: CGFloat) -> NSRect {
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         var origin = NSPoint(x: leftAnchor, y: topAnchor - height)
         if origin.y < visible.minY + 8 { origin.y = visible.minY + 8 }
         if origin.y + height > visible.maxY - 8 { origin.y = visible.maxY - 8 - height }
-        panel.setFrame(NSRect(origin: origin, size: NSSize(width: Self.width, height: height)), display: true, animate: false)
+        return NSRect(origin: origin, size: NSSize(width: Self.width, height: height))
     }
 
     private func installDismissMonitor() {
@@ -330,6 +382,17 @@ final class QuickTranslateModel: ObservableObject {
     /// the text and selecting does not mark terms; confirming re-translates.
     @Published var sourceEditing: Bool = false
 
+    /// While an explain card is open, the pane that stays expanded — the other
+    /// collapses to its header (tap it to switch, e.g. to select words there
+    /// too). Follows the pane the active term was picked from; nil = no card,
+    /// both panes shown normally.
+    @Published var focusedPane: Pane? = nil
+
+    /// Expand `pane` (collapsing the other) while a card is open.
+    func switchFocus(to pane: Pane) {
+        withAnimation(.easeInOut(duration: 0.22)) { focusedPane = pane }
+    }
+
     /// A highlighted term plus the context the explain endpoint needs (the
     /// sentence and explain direction) and where it sits, so the text can draw a
     /// persistent marker over it.
@@ -408,15 +471,20 @@ final class QuickTranslateModel: ObservableObject {
     func translate(_ text: String) {
         task?.cancel()
         clearSelection()
-        mode = .translate
-        sourceEditing = false
-        sourceText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        targetText = ""
-        revealed = false
+        // Animated: `sourceCard` is one persistent view bound to `sourceText`
+        // (see `QuickTranslateView`) that just becomes read-only here, so this
+        // transition updates it in place instead of swapping the view tree.
+        withAnimation(.easeInOut(duration: 0.22)) {
+            mode = .translate
+            sourceEditing = false
+            sourceText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            targetText = ""
+            revealed = false
 
-        // Detect EN/ES and translate to the other (only those two are supported).
-        detectedLang = QuickTranslateModel.detectLanguage(sourceText)
-        translateLang = detectedLang == "EN" ? "ES" : "EN"
+            // Detect EN/ES and translate to the other (only those two are supported).
+            detectedLang = QuickTranslateModel.detectLanguage(sourceText)
+            translateLang = detectedLang == "EN" ? "ES" : "EN"
+        }
 
         guard !sourceText.isEmpty else { phase = .idle; return }
         phase = .streaming
@@ -645,10 +713,17 @@ final class QuickTranslateModel: ObservableObject {
     }
 
     /// Switch the popover into the history list (Translate tapped with no text).
+    /// The source card now binds straight to `sourceText`, so it has to be
+    /// cleared here — otherwise a prior translation would linger in what's
+    /// supposed to be the empty compose box.
     func showHistory() {
         task?.cancel()
         clearSelection()
         sourceEditing = false
+        sourceText = ""
+        targetText = ""
+        revealed = false
+        phase = .idle
         historyEntries = history.all()
         mode = .history
     }
@@ -657,14 +732,16 @@ final class QuickTranslateModel: ObservableObject {
     func open(_ entry: HistoryEntry) {
         task?.cancel()
         clearSelection()
-        sourceEditing = false
-        sourceText = entry.source
-        targetText = entry.target
-        detectedLang = entry.detectedLang
-        translateLang = entry.translateLang
-        phase = .done
-        revealed = true
-        mode = .translate
+        withAnimation(.easeInOut(duration: 0.22)) {
+            sourceEditing = false
+            sourceText = entry.source
+            targetText = entry.target
+            detectedLang = entry.detectedLang
+            translateLang = entry.translateLang
+            phase = .done
+            revealed = true
+            mode = .translate
+        }
     }
 
     func deleteHistory(_ entry: HistoryEntry) {
@@ -694,18 +771,6 @@ final class QuickTranslateModel: ObservableObject {
         sourceEditing = false
         guard !text.isEmpty else { return }
         translate(text)
-    }
-
-    /// Open an empty editable input to translate something from scratch.
-    func startBlank() {
-        task?.cancel()
-        clearSelection()
-        mode = .translate
-        sourceText = ""
-        targetText = ""
-        revealed = false
-        phase = .idle
-        sourceEditing = true
     }
 
     private func reveal() {
@@ -745,24 +810,32 @@ final class QuickTranslateModel: ObservableObject {
         let tgt = termLang == "EN" ? "ES" : "EN"
         let sentence = pane == .source ? sourceText : targetText
         let item = LearnTerm(text: clean, sentence: sentence, sourceLang: src, targetLang: tgt, pane: pane, range: range)
-        // Re-selecting the exact same span just focuses it.
-        if let i = terms.firstIndex(where: { $0.pane == pane && NSEqualRanges($0.range, range) }) {
-            activeTermIndex = i
-        } else {
-            // No stacking: a new span replaces any markers it overlaps in this pane.
-            terms.removeAll { $0.pane == pane && NSIntersectionRange($0.range, range).length > 0 }
-            terms.append(item)
-            activeTermIndex = terms.count - 1
+        // Animated: opening the card collapses the other pane to its header
+        // and slides the card section in below.
+        withAnimation(.easeInOut(duration: 0.22)) {
+            // Re-selecting the exact same span just focuses it.
+            if let i = terms.firstIndex(where: { $0.pane == pane && NSEqualRanges($0.range, range) }) {
+                activeTermIndex = i
+            } else {
+                // No stacking: a new span replaces any markers it overlaps in this pane.
+                terms.removeAll { $0.pane == pane && NSIntersectionRange($0.range, range).length > 0 }
+                terms.append(item)
+                activeTermIndex = terms.count - 1
+            }
+            focusedPane = pane
         }
         loadCardIfNeeded(item)
     }
 
-    /// Move focus between the selected terms.
+    /// Move focus between the selected terms (follows the term's pane).
     func stepTerm(by delta: Int) {
         guard !terms.isEmpty else { return }
         let current = activeTermIndex ?? 0
         let next = (current + delta + terms.count) % terms.count
-        activeTermIndex = next
+        withAnimation(.easeInOut(duration: 0.22)) {
+            activeTermIndex = next
+            focusedPane = terms[next].pane
+        }
         loadCardIfNeeded(terms[next])
     }
 
@@ -771,11 +844,15 @@ final class QuickTranslateModel: ObservableObject {
         guard let i = activeTermIndex, terms.indices.contains(i) else { return }
         let key = terms[i].text
         explainTasks[key]?.cancel(); explainTasks[key] = nil
-        cards[key] = nil
-        loadingTerms.remove(key)
-        cardErrors[key] = nil
-        terms.remove(at: i)
-        activeTermIndex = terms.isEmpty ? nil : min(i, terms.count - 1)
+        // Animated: closing the last card gives the panes their space back.
+        withAnimation(.easeInOut(duration: 0.22)) {
+            cards[key] = nil
+            loadingTerms.remove(key)
+            cardErrors[key] = nil
+            terms.remove(at: i)
+            activeTermIndex = terms.isEmpty ? nil : min(i, terms.count - 1)
+            focusedPane = activeTerm?.pane
+        }
     }
 
     func retryActiveCard() {
@@ -820,6 +897,7 @@ final class QuickTranslateModel: ObservableObject {
         cards = [:]
         loadingTerms = []
         cardErrors = [:]
+        focusedPane = nil
     }
 }
 
@@ -831,40 +909,58 @@ struct QuickTranslateView: View {
     let onClose: () -> Void
     /// Apply the improved text in place (Improve's Replace action).
     var onReplace: (String) -> Void = { _ in }
-    @State private var sourceHeight: CGFloat = 22
-    @State private var targetHeight: CGFloat = 22
+    /// "Full history" tapped — open the main app's History/Transcript screen.
+    var onOpenFullHistory: () -> Void = {}
+    @State private var sourceHeight: CGFloat = QuickTranslateView.textBoxMinHeight
+    @State private var targetHeight: CGFloat = QuickTranslateView.textBoxMinHeight
     /// Measured natural height of the improve correction card, so it scrolls
     /// internally past a cap instead of growing the popover off-screen.
     @State private var cardHeight: CGFloat = 120
+    /// Same for the explain card (select-to-explain) — see `explainSection`.
+    @State private var explainHeight: CGFloat = 200
 
     /// Red tint marking the changed fragments in the original (Improve). Clearly
     /// visible for the currently-paged correction; `drawMarkers` dims the rest.
     private static let diffColor = NSColor.systemRed.withAlphaComponent(0.32)
     /// Cap for the correction card; taller (sentence-level) corrections scroll.
     private static let cardMaxHeight: CGFloat = 168
+    /// Width text lays out at inside a `cardChrome()` box: content width (368)
+    /// minus the card's own horizontal padding (12 × 2).
+    static let cardTextWidth: CGFloat = width - 32 - 24
+    /// Shared floor/ceiling for every text box that uses `cardChrome()` — the
+    /// source card and the translate result's target card. Same bounds
+    /// everywhere so a box's size doesn't jump just because a particular
+    /// state (loading vs. content, compose vs. translated) happened to use a
+    /// different cap.
+    static let textBoxMinHeight: CGFloat = 52
+    /// ~7 lines; past this the box scrolls internally. Kept modest on purpose:
+    /// with source + translation both capped, the whole popover stays well
+    /// under half the screen even for long pasted text.
+    static let textBoxMaxHeight: CGFloat = 160
+    /// Cap for the explain card; taller cards scroll internally. While a card
+    /// is open only ONE pane stays expanded (the other collapses to its
+    /// header), so the worst case — header 26 + box 160+20 + collapsed header
+    /// 26 + card 220 + dividers/gaps/padding — lands around 570, under the
+    /// panel's 600 cap without tightening the expanded box.
+    static let explainMaxHeight: CGFloat = 220
+    /// How many recent entries show inline under the source card in History.
+    /// Older ones live in the main app's History screen, reached via
+    /// `fullHistoryLink`.
+    private static let recentHistoryCount = 5
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if model.mode == .history {
-                historyView
-            } else if model.mode == .improve {
+            if model.mode == .improve {
                 improveView
             } else if model.mode == .listen {
                 listenView
-            } else if let term = model.activeTerm {
-                // One box: the pane the term was picked from (with its highlight),
-                // then the card. The other box is hidden.
-                paneView(term.pane, withClose: true, height: term.pane == .source ? $sourceHeight : $targetHeight)
-                Divider().overlay(Palette.border).opacity(0.6)
-                cardSection
             } else {
-                // No selection yet: detected text on top, its translation below.
-                // While editing the source, only the input shows.
-                paneView(.source, withClose: true, height: $sourceHeight)
-                if !model.sourceEditing {
-                    Divider().overlay(Palette.border).opacity(0.6)
-                    paneView(.target, withClose: false, height: $targetHeight)
-                }
+                // History ⇄ translate result: one persistent source card (see
+                // `sourceCard`) — only its editability/content and whatever's
+                // below it change with mode, so it's never replaced mid-transition.
+                // Picking a word keeps both panes visible (they tighten a bit)
+                // and adds the explain card underneath.
+                sourceCardSection
             }
         }
         .padding(16)
@@ -888,29 +984,28 @@ struct QuickTranslateView: View {
             }
         )
         .onPreferenceChange(QuickSizeKey.self) { onResize($0) }
+        // Pin to the window's top: the window can briefly be taller than the
+        // content (shrinks are deferred until content animations land — see
+        // `QuickTranslatePanel.resize(to:)`), and default centering would make
+        // the whole popover drift down and snap back on every shrink. Outside
+        // the GeometryReader so the reported size stays the content's own.
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     static let width: CGFloat = 400
 
-    // MARK: A language pane (detected on top, translation below) — selectable
+    // MARK: The translation pane (the source pane is `sourceCard`)
 
     @ViewBuilder
-    private func paneView(_ pane: QuickTranslateModel.Pane, withClose: Bool, height: Binding<CGFloat>) -> some View {
+    private func paneView(_ pane: QuickTranslateModel.Pane, height: Binding<CGFloat>) -> some View {
         let isSource = pane == .source
         let text = isSource ? model.sourceText : model.targetText
         let isEnglish = model.language(for: pane) == "EN"
-        let editing = isSource && model.sourceEditing
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 cardLabel(QuickTranslateModel.languageName(model.language(for: pane)))
                 Spacer()
-                // Edit the detected text (pencil), or confirm it (checkmark).
-                if isSource {
-                    QuickIconButton(system: editing ? "checkmark" : "pencil") {
-                        if model.sourceEditing { model.commitEdit() } else { model.beginEdit() }
-                    }
-                }
-                if !text.isEmpty, !editing {
+                if !text.isEmpty {
                     // Listen only for English — never read the Spanish side aloud.
                     if isEnglish {
                         QuickIconButton(system: "speaker.wave.2") {
@@ -923,19 +1018,14 @@ struct QuickTranslateView: View {
                         pb.setString(text, forType: .string)
                     }
                 }
-                if withClose {
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(Palette.muted)
-                            .frame(width: 20, height: 20)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .handCursor()
-                }
             }
+            // Reserve the icon-row height even while there are no icons yet
+            // (streaming), and fade them in when the text lands — otherwise
+            // their appearance pushes the card down.
+            .frame(height: 26)
+            .animation(.easeOut(duration: 0.2), value: text.isEmpty)
             paneText(pane, height: height)
+                .cardChrome()
         }
     }
 
@@ -950,8 +1040,9 @@ struct QuickTranslateView: View {
                 SelectableText(
                     text: isSource ? model.sourceText : model.targetText,
                     height: height,
-                    width: QuickTranslateView.width - 32,
-                    maxHeight: 240,
+                    width: QuickTranslateView.cardTextWidth,
+                    maxHeight: QuickTranslateView.textBoxMaxHeight,
+                    minHeight: QuickTranslateView.textBoxMinHeight,
                     highlights: model.highlights(for: pane),
                     isEditable: editing,
                     onTextChange: { if isSource { model.sourceText = $0 } },
@@ -969,15 +1060,25 @@ struct QuickTranslateView: View {
                         .font(.system(size: 15))
                         .foregroundStyle(Palette.tertiary)
                         .allowsHitTesting(false)
-                } else if !isSource, model.phase == .streaming, model.targetText.isEmpty {
-                    Text("Translating…")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Palette.tertiary)
+                } else if !isSource, !model.revealed {
+                    // Skeleton while the first delta is in flight. Keyed to
+                    // `revealed` (not text-emptiness) so its removal runs inside
+                    // `reveal()`'s withAnimation — it cross-fades with the text
+                    // instead of popping out. Sized to sit within the reserved
+                    // `textBoxMinHeight`, so short results land with no shift.
+                    VStack(alignment: .leading, spacing: 8) {
+                        shimmerBar(width: 220, height: 12)
+                        shimmerBar(width: 150, height: 12)
+                    }
+                    .padding(.top, 4)
                 }
             }
         }
     }
 
+    /// Sits between the two panes: the plain divider plus a swap control for
+    /// when auto-detection guesses the wrong language (easy on short or
+    /// ambiguous text) — tapping it corrects the direction and re-translates.
     private func translationError(_ message: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 6) {
@@ -1008,68 +1109,221 @@ struct QuickTranslateView: View {
             .foregroundStyle(Palette.tertiary)
     }
 
-    // MARK: History (shown when Translate is tapped with nothing selected)
+    // MARK: History ⇄ translate result (shown with nothing selected)
 
-    private var historyView: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                cardLabel("History")
-                Spacer()
-                if !model.historyEntries.isEmpty {
-                    Button(action: { model.clearHistory() }) {
-                        Text("Clear")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(Palette.muted)
-                    }
-                    .buttonStyle(.plain)
-                    .handCursor()
-                }
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Palette.muted)
-                        .frame(width: 20, height: 20)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .handCursor()
+    /// The header above the source card, plus what's below it. Only the
+    /// header content and the below-the-card section change with mode — the
+    /// card itself (`sourceCard`) is a single view used unconditionally, so
+    /// switching between History and a translate result reads as that one box
+    /// updating in place (Linear's persistent-viewport pattern: swap the
+    /// content, not the container).
+    ///
+    /// While an explain card is open only ONE pane keeps its text box; the
+    /// other collapses to just its header (its 26pt row stays, so nothing
+    /// jumps), which becomes the tap target to switch — expanding it to
+    /// select words there too.
+    @ViewBuilder
+    private var sourceCardSection: some View {
+        let sourceCollapsed = model.activeTerm != nil && model.focusedPane == .target
+        let targetCollapsed = model.activeTerm != nil && model.focusedPane != .target
+
+        HStack(alignment: .center) {
+            if model.mode == .history {
+                Text("Translate")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Palette.foreground)
+            } else if sourceCollapsed {
+                expandButton(for: .source)
+            } else {
+                cardLabel(QuickTranslateModel.languageName(model.detectedLang))
             }
-
-            // Start a fresh translation from a blank input.
-            Button(action: { model.startBlank() }) {
-                HStack(spacing: 8) {
-                    Image(systemName: "square.and.pencil").font(.system(size: 13, weight: .semibold))
-                    Text("New translation").font(.system(size: 13, weight: .medium))
-                    Spacer(minLength: 0)
+            Spacer()
+            if model.mode == .translate, !sourceCollapsed {
+                QuickIconButton(system: model.sourceEditing ? "checkmark" : "pencil") {
+                    if model.sourceEditing { model.commitEdit() } else { model.beginEdit() }
                 }
-                .foregroundStyle(Palette.foreground)
-                .padding(.vertical, 9)
-                .padding(.horizontal, 10)
-                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.elevated.opacity(0.5)))
+                if !model.sourceText.isEmpty, !model.sourceEditing {
+                    // Listen only for English — never read the Spanish side aloud.
+                    if model.detectedLang == "EN" {
+                        QuickIconButton(system: "speaker.wave.2") {
+                            Speaker.speak(model.sourceText, lang: "EN")
+                        }
+                    }
+                    QuickIconButton(system: "doc.on.doc") {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(model.sourceText, forType: .string)
+                    }
+                }
+            }
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Palette.muted)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Palette.elevated))
+                    .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .handCursor()
+        }
+        .frame(height: 26)
 
-            if model.historyEntries.isEmpty {
-                Text("No translations yet.")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Palette.tertiary)
-                    .padding(.vertical, 2)
-            } else {
-                ScrollView {
-                    VStack(spacing: 2) {
-                        ForEach(model.historyEntries) { entry in
-                            HistoryRow(
-                                entry: entry,
-                                onOpen: { model.open(entry) },
-                                onDelete: { model.deleteHistory(entry) }
-                            )
-                        }
+        if !sourceCollapsed {
+            sourceCard
+        }
+
+        if model.mode == .history {
+            if !model.historyEntries.isEmpty {
+                Divider().overlay(Palette.border).opacity(0.5)
+                cardLabel("Recent")
+
+                let recent = Array(model.historyEntries.prefix(QuickTranslateView.recentHistoryCount))
+                VStack(spacing: 0) {
+                    ForEach(recent) { entry in
+                        HistoryRow(
+                            entry: entry,
+                            onOpen: { model.open(entry) },
+                            onDelete: { model.deleteHistory(entry) }
+                        )
                     }
                 }
-                .frame(maxHeight: 340)
+                fullHistoryLink
+            }
+        } else if !model.sourceEditing {
+            Divider().overlay(Palette.border).opacity(0.6)
+            if targetCollapsed {
+                HStack {
+                    expandButton(for: .target)
+                    Spacer()
+                }
+                .frame(height: 26)
+            } else {
+                paneView(.target, height: $targetHeight)
+            }
+
+            if model.activeTerm != nil {
+                Divider().overlay(Palette.border).opacity(0.6)
+                explainSection
+            } else if model.phase == .done {
+                // Make the select-to-explain feature discoverable — nothing
+                // else hints that the text is interactive.
+                selectHint
             }
         }
+    }
+
+    /// The collapsed pane's header-as-button: same label in the same spot,
+    /// plus a chevron so it reads as expandable. Tapping brings that pane's
+    /// text back (collapsing the other) so words can be selected there too.
+    private func expandButton(for pane: QuickTranslateModel.Pane) -> some View {
+        Button(action: { model.switchFocus(to: pane) }) {
+            HStack(spacing: 5) {
+                cardLabel(QuickTranslateModel.languageName(model.language(for: pane)))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(Palette.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Show this text")
+        .handCursor()
+    }
+
+    /// One quiet line under the result teaching the core learning gesture.
+    private var selectHint: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "character.cursor.ibeam")
+                .font(.system(size: 10, weight: .medium))
+            Text("Select any word or phrase to see its meaning")
+                .font(.system(size: 11))
+        }
+        .foregroundStyle(Palette.tertiary)
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    /// The explain card, height-capped: sized to content while it fits,
+    /// scrolling internally past `explainMaxHeight` so it never pushes the
+    /// popover (which keeps both panes visible above it) off the screen.
+    /// Same measured-height pattern as the improve correction card.
+    private var explainSection: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            cardSection
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(key: ExplainCardHeightKey.self, value: geo.size.height)
+                    }
+                )
+        }
+        .frame(height: min(max(explainHeight, 1), QuickTranslateView.explainMaxHeight))
+        .onPreferenceChange(ExplainCardHeightKey.self) { explainHeight = $0 }
+    }
+
+    /// The one persistent text box for whatever's being translated: empty and
+    /// editable before there's anything (History's compose input), then
+    /// showing the detected text once translated (tap the pencil to edit
+    /// again). Always bound straight to `model.sourceText` — this is the same
+    /// view in both states, not two different views standing in for each
+    /// other.
+    @ViewBuilder
+    private var sourceCard: some View {
+        let editing = model.mode == .history || model.sourceEditing
+        ZStack(alignment: .topLeading) {
+            SelectableText(
+                text: model.sourceText,
+                height: $sourceHeight,
+                width: QuickTranslateView.cardTextWidth,
+                maxHeight: QuickTranslateView.textBoxMaxHeight,
+                minHeight: QuickTranslateView.textBoxMinHeight,
+                highlights: model.highlights(for: .source),
+                isEditable: editing,
+                onTextChange: { model.sourceText = $0 },
+                onCommit: {
+                    if model.mode == .history {
+                        let trimmed = model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else { return }
+                        model.translate(trimmed)
+                    } else {
+                        model.commitEdit()
+                    }
+                }
+            ) { term, range in
+                model.explain(term: term, pane: .source, range: range)
+            }
+            .frame(height: sourceHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if editing, model.sourceText.isEmpty {
+                Text("Type or paste text to translate…")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Palette.tertiary)
+                    .allowsHitTesting(false)
+            }
+        }
+        .cardChrome()
+    }
+
+    /// Jumps to the full history in the main app — the popover only ever shows
+    /// the last few. `onOpenFullHistory` is a no-op until `AppDelegate` wires it
+    /// to the main window (that window, and the ability to open it to a
+    /// specific section, don't exist on this branch yet).
+    private var fullHistoryLink: some View {
+        HStack {
+            Spacer()
+            Button(action: onOpenFullHistory) {
+                HStack(spacing: 4) {
+                    Text("Full history")
+                        .font(.system(size: 12, weight: .medium))
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundStyle(Palette.muted)
+            }
+            .buttonStyle(.plain)
+            .handCursor()
+        }
+        .padding(.top, 4)
     }
 
     // MARK: Listen (TTS playback + select-to-hear, no explanations)
@@ -1513,11 +1767,20 @@ struct QuickTranslateView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Shaped like the card it's standing in for — a meanings line plus two
+    /// example pairs (the typical payload) — so the swap to real content is a
+    /// small settle, not a big grow. The headword above it is already real.
     private var cardShimmer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            shimmerBar(width: 120, height: 15)
-            shimmerBar(width: 200, height: 12)
-            shimmerBar(width: 240, height: 12)
+        VStack(alignment: .leading, spacing: 16) {
+            shimmerBar(width: 230, height: 14)
+            VStack(alignment: .leading, spacing: 5) {
+                shimmerBar(width: 280, height: 12)
+                shimmerBar(width: 220, height: 11)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                shimmerBar(width: 260, height: 12)
+                shimmerBar(width: 200, height: 11)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1716,6 +1979,9 @@ private struct SelectableText: NSViewRepresentable {
     /// Cap the box height; past it the text scrolls internally instead of growing
     /// the popover off-screen.
     var maxHeight: CGFloat = .greatestFiniteMagnitude
+    /// Floor the box height (e.g. a compose input that shouldn't look like a
+    /// cramped single line while empty).
+    var minHeight: CGFloat = 0
     /// Persistent markers for the words already picked, and which one is focused.
     var highlights: [(range: NSRange, active: Bool)] = []
     /// Override the marker fill (e.g. a red diff tint for Improve). Defaults to
@@ -1744,6 +2010,23 @@ private struct SelectableText: NSViewRepresentable {
         return ceil(rect.height) + 6
     }
 
+    /// Real layout height of `textView`'s current content at `width` — reads
+    /// the same layout manager/text container the view renders with, instead
+    /// of a separate `NSString.boundingRect` estimate that can diverge from it
+    /// (notably: reserving a phantom extra line when a wrapped line exactly
+    /// fills the container width). Falls back to `height(of:width:)` on the
+    /// rare case the layout manager isn't available yet.
+    static func measuredHeight(_ textView: NSTextView, width: CGFloat) -> CGFloat {
+        guard let layoutManager = textView.layoutManager, let container = textView.textContainer else {
+            return height(of: textView.string, width: width)
+        }
+        // Container width is already set by the caller (`updateNSView`), the
+        // single source of truth — just measure against it.
+        layoutManager.ensureLayout(for: container)
+        let used = layoutManager.usedRect(for: container)
+        return ceil(used.height) + textView.textContainerInset.height * 2
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(onSelect: onSelect, onTextChange: onTextChange, onCommit: onCommit)
     }
@@ -1764,7 +2047,14 @@ private struct SelectableText: NSViewRepresentable {
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.lineFragmentPadding = 0
-        textView.textContainer?.widthTracksTextView = true
+        // We set the container's width ourselves every `updateNSView` pass
+        // (below), from the same `width` SwiftUI lays this view out at.
+        // Leaving `widthTracksTextView` on too means AppKit's own auto-sync
+        // (driven by the NSTextView's *actual* frame, which can briefly lag
+        // behind during a panel resize) fights our explicit value — a one-frame
+        // mismatch there re-wraps the text at the wrong width, changes the
+        // measured height, and shows up as a visible pop before it corrects.
+        textView.textContainer?.widthTracksTextView = false
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.delegate = context.coordinator
 
@@ -1802,6 +2092,9 @@ private struct SelectableText: NSViewRepresentable {
         coordinator.onTextChange = onTextChange
         coordinator.onCommit = onCommit
 
+        // Single source of truth for the container's width (see `makeNSView`).
+        textView.textContainer?.containerSize = NSSize(width: max(width, 1), height: .greatestFiniteMagnitude)
+
         textView.isEditable = isEditable
         if textView.string != text {
             textView.string = text
@@ -1825,13 +2118,24 @@ private struct SelectableText: NSViewRepresentable {
         textView.spokenMarker = (isEditable ? nil : spokenRange).flatMap { NSMaxRange($0) <= length ? $0 : nil }
         textView.needsDisplay = true
 
-        // Deterministic content height (text + width), capped — past the cap the
-        // scroll view takes over instead of the popover growing off-screen.
-        let full = SelectableText.height(of: text, width: width)
-        let target = min(full, maxHeight)
+        // Deterministic content height (text + width), floored and capped — past
+        // the cap the scroll view takes over instead of the popover growing
+        // off-screen. Measured off the text view's own layout manager (not a
+        // separate `boundingRect` estimate) — `NSString.boundingRect` reserves a
+        // phantom extra line whenever a wrapped line exactly fills the width,
+        // which read as the box growing/scrolling one line early.
+        let full = SelectableText.measuredHeight(textView, width: width)
+        let target = min(max(full, minHeight), maxHeight)
         scroll.hasVerticalScroller = full > maxHeight + 0.5
         if abs(target - height) > 0.5 {
-            DispatchQueue.main.async { height = target }
+            // Animated so the box grows/shrinks smoothly as content changes
+            // (streamed deltas, typing past a wrap) instead of snapping a line
+            // at a time. Must stay shorter than the popover window's deferred
+            // shrink (0.32s in `QuickTranslatePanel.resize`) so the window
+            // never clips a box that's still animating.
+            DispatchQueue.main.async {
+                withAnimation(.easeOut(duration: 0.18)) { height = target }
+            }
         }
     }
 
@@ -1869,12 +2173,13 @@ private struct SelectableText: NSViewRepresentable {
         }
 
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-            // Enter confirms the edit instead of inserting a newline.
-            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-                onCommit()
-                return true
-            }
-            return false
+            // Enter confirms; Shift+Enter inserts a real line break instead —
+            // returning false here lets the text view's own default handling
+            // (a plain newline) run, same as any normal multi-line input.
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
+            if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { return false }
+            onCommit()
+            return true
         }
     }
 }
@@ -1892,6 +2197,25 @@ private final class WordSelectingTextView: NSTextView {
 
     /// Register a selection on the first click even when the panel isn't key.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// This app is a menu-bar accessory with no app-wide Edit menu (nothing
+    /// establishes Cmd+A/C/V/X as key equivalents), so the standard editing
+    /// shortcuts never reach us through the usual menu route — handle them
+    /// directly instead of depending on one.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+              let key = event.charactersIgnoringModifiers?.lowercased() else {
+            return super.performKeyEquivalent(with: event)
+        }
+        switch key {
+        case "a": selectAll(nil)
+        case "c": copy(nil)
+        case "v": paste(nil)
+        case "x": cut(nil)
+        default: return super.performKeyEquivalent(with: event)
+        }
+        return true
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         drawMarkers()
@@ -1955,6 +2279,24 @@ extension View {
             if case .active = phase { NSCursor.pointingHand.set() }
         }
     }
+
+    /// Consistent boxed-card chrome — rounded, filled, hairline border — shared
+    /// by the compose input and the translate result's source/target text, so
+    /// the popover reads as one continuous surface instead of switching visual
+    /// language depending on whether there's a translation yet.
+    func cardChrome() -> some View {
+        self
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Palette.elevated.opacity(0.6))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Palette.border, lineWidth: 1)
+            )
+    }
 }
 
 /// Grow a raw selection to the whole words it touches; a selection covering no
@@ -1986,33 +2328,34 @@ private struct HistoryRow: View {
     @State private var hover = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            // A real Button (not onTapGesture) so the first click registers even
-            // when the panel isn't key — tap gestures ignore acceptsFirstMouse.
-            Button(action: onOpen) {
-                HStack(alignment: .top, spacing: 10) {
-                    Text("\(entry.detectedLang) → \(entry.translateLang)")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Palette.tertiary)
-                        .frame(width: 54, alignment: .leading)
-                        .padding(.top, 2)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(entry.source)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(Palette.foreground)
-                            .lineLimit(1)
-                        Text(entry.target)
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(Palette.muted)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 6)
-                }
+        // A real Button (not onTapGesture) so the first click registers even
+        // when the panel isn't key — tap gestures ignore acceptsFirstMouse.
+        // One quiet line, source → target — no language badge, no visible
+        // timestamp (it's a tooltip); the delete affordance is the only thing
+        // that appears on hover.
+        Button(action: onOpen) {
+            (Text(entry.source)
+                .foregroundColor(Palette.muted)
+             + Text("  →  ")
+                .foregroundColor(Palette.tertiary)
+             + Text(entry.target)
+                .foregroundColor(Palette.tertiary))
+                .font(.system(size: 13))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.vertical, 7)
+                .padding(.horizontal, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(hover ? Palette.elevated.opacity(0.3) : Color.clear)
+                )
                 .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .handCursor()
-
+        }
+        .buttonStyle(.plain)
+        .handCursor()
+        .help(HistoryRow.relative(entry.timestamp))
+        .overlay(alignment: .trailing) {
             if hover {
                 Button(action: onDelete) {
                     Image(systemName: "xmark")
@@ -2025,19 +2368,9 @@ private struct HistoryRow: View {
                 .buttonStyle(.plain)
                 .help("Remove")
                 .handCursor()
-            } else {
-                Text(HistoryRow.relative(entry.timestamp))
-                    .font(.system(size: 10))
-                    .foregroundStyle(Palette.tertiary)
-                    .padding(.top, 2)
+                .padding(.trailing, 2)
             }
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(hover ? Palette.elevated.opacity(0.5) : Color.clear)
-        )
         .onHover { hover = $0 }
     }
 
@@ -2261,6 +2594,16 @@ private struct ImproveCardHeightKey: PreferenceKey {
     }
 }
 
+/// Natural (uncapped) height of the explain card, reported up so its scroll
+/// view sizes to content up to `QuickTranslateView.explainMaxHeight`.
+private struct ExplainCardHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > value { value = next }
+    }
+}
+
 /// Native vibrancy backing for the popover's frosted surface.
 private struct QuickVisualEffectView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
@@ -2319,6 +2662,27 @@ private struct QuickPreviewClient: TransformClient {
             model.revealed = true
             model.phase = .done
         }
+}
+
+private struct QuickPreviewHistoryStore: HistoryStore {
+    let entries: [HistoryEntry]
+    func all() -> [HistoryEntry] { entries }
+    func add(_ entry: HistoryEntry) {}
+    func remove(id: String) {}
+    func clear() {}
+}
+
+#Preview("History") {
+    let stub = QuickPreviewHistoryStore(entries: [
+        HistoryEntry(id: "1", source: "The committee reached a tentative agreement.", target: "El comité alcanzó un acuerdo tentativo.", detectedLang: "EN", translateLang: "ES", timestamp: Date(timeIntervalSinceNow: -120)),
+        HistoryEntry(id: "2", source: "Necesito hablar con vos mañana.", target: "I need to talk to you tomorrow.", detectedLang: "ES", translateLang: "EN", timestamp: Date(timeIntervalSinceNow: -3600)),
+        HistoryEntry(id: "3", source: "Let's meet at noon.", target: "Reunámonos al mediodía.", detectedLang: "EN", translateLang: "ES", timestamp: Date(timeIntervalSinceNow: -7200)),
+        HistoryEntry(id: "4", source: "¿Podés enviarme el archivo?", target: "Can you send me the file?", detectedLang: "ES", translateLang: "EN", timestamp: Date(timeIntervalSinceNow: -90000)),
+    ])
+    let model = QuickTranslateModel(client: QuickPreviewClient(), history: stub)
+    return QuickTranslateView(model: model, onResize: { _ in }, onClose: {})
+        .padding(40)
+        .onAppear { model.showHistory() }
 }
 
 #Preview("Improve") {
