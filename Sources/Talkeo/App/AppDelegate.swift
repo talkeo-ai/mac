@@ -29,6 +29,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quickTranslate.onVisibilityChange = { [weak self] visible in
             self?.floatingBar.setHoldRevealed(visible)
         }
+        // "Full history" in the popover opens the app's Translate view with its
+        // history drawer open.
+        quickTranslate.onOpenFullHistory = { [weak self] in self?.mainWindow.openTranslateHistory() }
         floatingBar.show()
 
         statusBar = StatusBarController(
