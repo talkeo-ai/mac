@@ -1153,7 +1153,7 @@ struct QuickTranslateView: View {
             }
             Spacer()
             if model.mode == .translate, !sourceCollapsed {
-                QuickIconButton(system: model.sourceEditing ? "checkmark" : "pencil") {
+                QuickIconButton(system: model.sourceEditing ? "checkmark" : "pencil", weight: .bold) {
                     if model.sourceEditing { model.commitEdit() } else { model.beginEdit() }
                 }
                 if !model.sourceText.isEmpty, !model.sourceEditing {
@@ -2573,13 +2573,17 @@ private struct ListenTransport: View {
 
 private struct QuickIconButton: View {
     let system: String
+    /// SF's default strokes read wispy at 12pt for some glyphs (the pencil,
+    /// notably) — callers bump this to keep their icon's optical weight in
+    /// line with the row.
+    var weight: Font.Weight = .medium
     let action: () -> Void
     @State private var hover = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: system)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 12, weight: weight))
                 .foregroundStyle(Palette.muted)
                 .frame(width: 26, height: 26)
                 .background(
