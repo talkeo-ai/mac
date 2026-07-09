@@ -242,6 +242,7 @@ final class FloatingBarPanel {
         revealed = true
         panel.setFrame(NSRect(origin: shownOrigin(), size: size), display: true)
         panel.orderFrontRegardless()
+        if !windowTagged { windowTagged = BackgroundCursor.tagWindow(panel) }
         refreshTracking()
         evaluate(animated: false)
         syncCursor() // the bar may have appeared under a stationary cursor
