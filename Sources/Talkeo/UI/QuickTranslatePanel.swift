@@ -198,7 +198,15 @@ final class QuickTranslatePanel {
         var origin = NSPoint(x: leftAnchor, y: topAnchor - height)
         if origin.y < visible.minY + 8 { origin.y = visible.minY + 8 }
         if origin.y + height > visible.maxY - 8 { origin.y = visible.maxY - 8 - height }
-        panel.setFrame(NSRect(origin: origin, size: NSSize(width: Self.width, height: height)), display: true, animate: false)
+        let frame = NSRect(origin: origin, size: NSSize(width: Self.width, height: height))
+        // Animated so the window follows the content's own transition (mode
+        // switches, the target card revealing) instead of snapping around it —
+        // same duration as the SwiftUI-side `withAnimation` calls it pairs with.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().setFrame(frame, display: true)
+        }
     }
 
     private func installDismissMonitor() {
@@ -362,20 +370,23 @@ final class QuickTranslateModel: ObservableObject {
         self.history = history
     }
 
-    func translate(_ text: String, detectedLangOverride: String? = nil) {
+    func translate(_ text: String) {
         task?.cancel()
         clearSelection()
-        mode = .translate
-        sourceEditing = false
-        sourceText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        targetText = ""
-        revealed = false
+        // Animated: the compose input (History) and the source card share a
+        // `matchedGeometryEffect` id, so this transition morphs one into the
+        // other instead of hard-swapping the view tree.
+        withAnimation(.easeInOut(duration: 0.22)) {
+            mode = .translate
+            sourceEditing = false
+            sourceText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            targetText = ""
+            revealed = false
 
-        // Detect EN/ES and translate to the other (only those two are supported),
-        // unless the caller already knows the direction (a manual swap, or retry
-        // preserving a prior correction).
-        detectedLang = detectedLangOverride ?? QuickTranslateModel.detectLanguage(sourceText)
-        translateLang = detectedLang == "EN" ? "ES" : "EN"
+            // Detect EN/ES and translate to the other (only those two are supported).
+            detectedLang = QuickTranslateModel.detectLanguage(sourceText)
+            translateLang = detectedLang == "EN" ? "ES" : "EN"
+        }
 
         guard !sourceText.isEmpty else { phase = .idle; return }
         phase = .streaming
@@ -399,16 +410,7 @@ final class QuickTranslateModel: ObservableObject {
         }
     }
 
-    func retry() { translate(sourceText, detectedLangOverride: detectedLang) }
-
-    /// Auto-detection guessed wrong (easy on short/ambiguous text) — the user
-    /// tapped the swap control to correct it. Only EN/ES are supported, so
-    /// flipping which one the source is tagged as fully determines the new
-    /// direction; re-translates with it.
-    func swapLanguages() {
-        guard !sourceText.isEmpty, phase != .streaming else { return }
-        translate(sourceText, detectedLangOverride: translateLang)
-    }
+    func retry() { translate(sourceText) }
 
     // MARK: Listen (TTS playback + select-to-hear)
 
@@ -625,14 +627,16 @@ final class QuickTranslateModel: ObservableObject {
     func open(_ entry: HistoryEntry) {
         task?.cancel()
         clearSelection()
-        sourceEditing = false
-        sourceText = entry.source
-        targetText = entry.target
-        detectedLang = entry.detectedLang
-        translateLang = entry.translateLang
-        phase = .done
-        revealed = true
-        mode = .translate
+        withAnimation(.easeInOut(duration: 0.22)) {
+            sourceEditing = false
+            sourceText = entry.source
+            targetText = entry.target
+            detectedLang = entry.detectedLang
+            translateLang = entry.translateLang
+            phase = .done
+            revealed = true
+            mode = .translate
+        }
     }
 
     func deleteHistory(_ entry: HistoryEntry) {
@@ -794,12 +798,19 @@ struct QuickTranslateView: View {
     /// Measured natural height of the improve correction card, so it scrolls
     /// internally past a cap instead of growing the popover off-screen.
     @State private var cardHeight: CGFloat = 120
+    /// Links the compose input (History) to the source card (translate
+    /// result) so the same box visually morphs between the two instead of
+    /// one replacing the other — see `cardChrome()`/`historyView`/`paneView`.
+    @Namespace private var cardNamespace
 
     /// Red tint marking the changed fragments in the original (Improve). Clearly
     /// visible for the currently-paged correction; `drawMarkers` dims the rest.
     private static let diffColor = NSColor.systemRed.withAlphaComponent(0.32)
     /// Cap for the correction card; taller (sentence-level) corrections scroll.
     private static let cardMaxHeight: CGFloat = 168
+    /// Width text lays out at inside a `cardChrome()` box: content width (368)
+    /// minus the card's own horizontal padding (12 × 2).
+    static let cardTextWidth: CGFloat = width - 32 - 24
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -820,7 +831,7 @@ struct QuickTranslateView: View {
                 // While editing the source, only the input shows.
                 paneView(.source, withClose: true, height: $sourceHeight)
                 if !model.sourceEditing {
-                    languageSwapDivider
+                    Divider().overlay(Palette.border).opacity(0.6)
                     paneView(.target, withClose: false, height: $targetHeight)
                 }
             }
@@ -894,6 +905,11 @@ struct QuickTranslateView: View {
                 }
             }
             paneText(pane, height: height)
+                .cardChrome()
+                // The source card shares an identity with the compose input
+                // (`historyView`) — SwiftUI morphs the one box between the two
+                // instead of swapping it out when a translation starts.
+                .matchedGeometryEffect(id: isSource ? "sourceCard" : "targetCard-\(pane)", in: cardNamespace)
         }
     }
 
@@ -908,7 +924,7 @@ struct QuickTranslateView: View {
                 SelectableText(
                     text: isSource ? model.sourceText : model.targetText,
                     height: height,
-                    width: QuickTranslateView.width - 32,
+                    width: QuickTranslateView.cardTextWidth,
                     maxHeight: 240,
                     highlights: model.highlights(for: pane),
                     isEditable: editing,
@@ -939,29 +955,6 @@ struct QuickTranslateView: View {
     /// Sits between the two panes: the plain divider plus a swap control for
     /// when auto-detection guesses the wrong language (easy on short or
     /// ambiguous text) — tapping it corrects the direction and re-translates.
-    private var languageSwapDivider: some View {
-        ZStack {
-            Divider().overlay(Palette.border).opacity(0.6)
-            HStack {
-                Spacer()
-                Button(action: { model.swapLanguages() }) {
-                    Image(systemName: "arrow.up.arrow.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Palette.muted)
-                        .frame(width: 18, height: 18)
-                        .background(Circle().fill(Palette.elevated))
-                        .overlay(Circle().stroke(Palette.border, lineWidth: 1))
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .disabled(model.sourceText.isEmpty || model.phase == .streaming)
-                .help("Wrong language detected? Swap EN ⇄ ES")
-                .handCursor()
-                Spacer()
-            }
-        }
-    }
-
     private func translationError(_ message: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 6) {
@@ -1021,6 +1014,7 @@ struct QuickTranslateView: View {
             }
 
             HistoryComposeInput(onSubmit: { model.translate($0) })
+                .matchedGeometryEffect(id: "sourceCard", in: cardNamespace)
 
             if !model.historyEntries.isEmpty {
                 Divider().overlay(Palette.border).opacity(0.5)
@@ -2000,6 +1994,24 @@ extension View {
             if case .active = phase { NSCursor.pointingHand.set() }
         }
     }
+
+    /// Consistent boxed-card chrome — rounded, filled, hairline border — shared
+    /// by the compose input and the translate result's source/target text, so
+    /// the popover reads as one continuous surface instead of switching visual
+    /// language depending on whether there's a translation yet.
+    func cardChrome() -> some View {
+        self
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Palette.elevated.opacity(0.6))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Palette.border, lineWidth: 1)
+            )
+    }
 }
 
 /// Grow a raw selection to the whole words it touches; a selection covering no
@@ -2097,9 +2109,9 @@ private struct HistoryComposeInput: View {
 
     private static let minHeight: CGFloat = 52
     private static let maxHeight: CGFloat = 140
-    /// Popover content width (368) minus this view's own horizontal padding —
-    /// `SelectableText` needs the exact laid-out width to size itself.
-    private static let textWidth: CGFloat = QuickTranslateView.width - 32 - 24
+    /// `SelectableText` needs the exact laid-out width to size itself — same
+    /// card padding as `cardChrome()`.
+    private static let textWidth: CGFloat = QuickTranslateView.cardTextWidth
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -2131,16 +2143,7 @@ private struct HistoryComposeInput: View {
                     .allowsHitTesting(false)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Palette.elevated.opacity(0.6))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Palette.border, lineWidth: 1)
-        )
+        .cardChrome()
     }
 }
 
