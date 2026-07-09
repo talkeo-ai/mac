@@ -44,6 +44,10 @@ final class StatusBarController {
 
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
+        // AppKit's auto-enablement would override the manual `isEnabled` state
+        // set in `refreshStatus()` (e.g. Auto-hide grayed out while the bar is
+        // hidden), so this menu manages enablement itself.
+        menu.autoenablesItems = false
         menu.delegate = MenuRefresher.shared
         MenuRefresher.shared.controller = self
 
@@ -67,6 +71,7 @@ final class StatusBarController {
         let auto = NSMenuItem(title: "Auto-hide bar", action: #selector(MenuActions.toggleAutoHide(_:)), keyEquivalent: "")
         auto.target = MenuActions.shared
         auto.state = isAutoHide() ? .on : .off
+        auto.isEnabled = isFloatingBarVisible()
         menu.addItem(auto)
 
         menu.addItem(.separator())

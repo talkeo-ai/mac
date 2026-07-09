@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainWindow: MainWindowController!
     private let reader = SelectionReader()
     private let permission = AccessibilityPermission()
+    private let settings: SettingsStore = LocalSettingsStore.shared
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Compact translate + learn popover. (The selection tooltip still exists
@@ -32,6 +33,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // "Full history" in the popover opens the app's Translate view with its
         // history drawer open.
         quickTranslate.onOpenFullHistory = { [weak self] in self?.mainWindow.openTranslateHistory() }
+        // Restore persisted preferences before the first show, so an auto-hiding
+        // bar starts retracted instead of flashing revealed.
+        floatingBar.setAutoHide(settings.barAutoHide)
         floatingBar.show()
 
         statusBar = StatusBarController(
@@ -42,7 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             isAutoHide: { [weak self] in self?.floatingBar.isAutoHide ?? false },
             toggleAutoHide: { [weak self] in
                 guard let self else { return }
-                self.floatingBar.setAutoHide(!self.floatingBar.isAutoHide)
+                let value = !self.floatingBar.isAutoHide
+                self.floatingBar.setAutoHide(value)
+                self.settings.barAutoHide = value
             },
             quit: { NSApp.terminate(nil) }
         )
