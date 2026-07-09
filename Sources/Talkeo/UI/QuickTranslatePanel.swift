@@ -11,8 +11,15 @@ import SwiftUI
 /// card below** (meaning, examples, a typed insight). It dismisses on a click
 /// anywhere outside it.
 ///
-/// The panel stays non-activating (it never steals focus when it appears) but
-/// can become key, so clicking into it to select text works.
+/// Presenting makes this panel key WITHOUT activating the app (Spotlight
+/// style): opening an option means the user wants to use it, so typing and
+/// clicking work immediately — but activating would raise every other Talkeo
+/// window too (e.g. the main app window, when open). The app behind keeps
+/// being the frontmost app, which Improve's Replace depends on. Cursor
+/// correctness inside a key-but-inactive window comes from the same
+/// per-window server tag the floating bar uses (`BackgroundCursor.tagWindow`,
+/// whose documented purpose is exactly this: panels presenting editable
+/// controls from an inactive app).
 final class QuickPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
@@ -32,6 +39,17 @@ final class QuickTranslatePanel {
     private var dismissMonitor: Any?
     private var topAnchor: CGFloat = 0
     private var leftAnchor: CGFloat = 0
+
+    /// Fires with `true` when the popover comes on screen and `false` once it
+    /// leaves, whatever the path (dismiss click, close button, Replace). The
+    /// owner uses it to hold the floating bar revealed while we're open.
+    var onVisibilityChange: ((Bool) -> Void)?
+
+    /// The app that was frontmost when the popover opened. We don't activate,
+    /// so frontmost normally stays put — but capturing it at open time makes
+    /// Improve's Replace target independent of whatever focus dance happens
+    /// while the popover is up.
+    private var previousApp: NSRunningApplication?
 
     private static let width: CGFloat = 400
     private static let nominalHeight: CGFloat = 170
@@ -113,13 +131,13 @@ final class QuickTranslatePanel {
         present()
     }
 
-    /// Apply the improved text in place. Capture the target app *before* closing
-    /// (our non-activating panel left it frontmost), order the panel out instantly
-    /// so it resigns key with no fade delay, then let the replacer do its thing
-    /// (AX write first, clipboard + ⌘V fallback).
+    /// Apply the improved text in place. The popover holds focus while open,
+    /// so the write-back target is the app captured at present time. Order the
+    /// panel out instantly so it resigns key with no fade delay, then let the
+    /// replacer do its thing (AX write first, clipboard + ⌘V fallback).
     private func performReplace(_ text: String) {
         guard !text.isEmpty else { return }
-        let target = NSWorkspace.shared.frontmostApplication
+        let target = previousApp ?? NSWorkspace.shared.frontmostApplication
         // Terminals: the selection is copy-only and decoupled from the editable
         // input, and AX exposes the whole scrollback (not a logical input line), so
         // there's no sound way to edit the selection in place — especially in TUIs
@@ -127,6 +145,7 @@ final class QuickTranslatePanel {
         if SelectionReplacer.isTerminal(target) {
             replacer.copyToClipboard(text)
             closeImmediately()
+            target?.activate() // hand focus back for the deliberate paste
             return
         }
         closeImmediately()
@@ -141,9 +160,15 @@ final class QuickTranslatePanel {
         TTSAudioPlayer.shared.stop()
         panel.orderOut(nil)
         panel.alphaValue = 1
+        onVisibilityChange?(false)
     }
 
     private func present() {
+        // Capture who has focus before we take it — only on the transition, so
+        // re-presenting while already active can't overwrite it with ourselves.
+        if !NSApp.isActive {
+            previousApp = NSWorkspace.shared.frontmostApplication
+        }
         computeAnchor()
         let origin = NSPoint(x: leftAnchor, y: topAnchor - Self.nominalHeight)
         panel.setFrame(NSRect(origin: origin, size: NSSize(width: Self.width, height: Self.nominalHeight)), display: true)
@@ -155,7 +180,18 @@ final class QuickTranslatePanel {
                 panel.animator().alphaValue = 1
             }
         }
+        // Key only — never NSApp.activate(): activation raises the app's other
+        // windows too (the main window, when open), yanking the user out of
+        // their context just for a popover.
+        panel.makeKey()
+        // Cursor authority while key-but-inactive (I-beam over text, etc.);
+        // async because tag application is asynchronous in the window server.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            _ = BackgroundCursor.tagWindow(self.panel)
+        }
         installDismissMonitor()
+        onVisibilityChange?(true)
     }
 
     func hide() {
@@ -170,6 +206,22 @@ final class QuickTranslatePanel {
             self?.panel.orderOut(nil)
             self?.panel.alphaValue = 1
         })
+        // Release the bar as soon as the fade starts — visually the popover is
+        // already going away, so the bar may retract with it.
+        onVisibilityChange?(false)
+        restoreFocus()
+    }
+
+    /// Hand focus back to the app the popover took it from — but only if we
+    /// still hold it. Deferred a beat: when the dismissal was a click on
+    /// another app, that click's own activation may still be in flight, and
+    /// re-activating the previous app here would steal focus from where the
+    /// user just put it.
+    private func restoreFocus() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self, NSApp.isActive else { return }
+            self.previousApp?.activate()
+        }
     }
 
     /// Pin the top-left so the popover grows downward from a fixed point, tucked
