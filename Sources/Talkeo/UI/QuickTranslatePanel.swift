@@ -1153,7 +1153,7 @@ struct QuickTranslateView: View {
             }
             Spacer()
             if model.mode == .translate, !sourceCollapsed {
-                QuickIconButton(system: model.sourceEditing ? "checkmark" : "pencil", weight: .bold) {
+                QuickIconButton(icon: model.sourceEditing ? .system("checkmark", weight: .bold) : .pencil) {
                     if model.sourceEditing { model.commitEdit() } else { model.beginEdit() }
                 }
                 if !model.sourceText.isEmpty, !model.sourceEditing {
@@ -2571,19 +2571,63 @@ private struct ListenTransport: View {
     }
 }
 
+/// The one non-SF glyph in the row: SF's pencil is a wispy diagonal stick even
+/// in bold, so the edit affordance uses Lucide's pencil (ISC license), traced
+/// from its 24×24 SVG. Arcs are pre-solved from the SVG's endpoint form into
+/// center/angle form; all sweep counterclockwise on screen (`clockwise: true`
+/// in CG's y-up convention).
+private struct LucidePencilShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let s = min(rect.width, rect.height) / 24
+        let ox = rect.midX - 12 * s
+        let oy = rect.midY - 12 * s
+        func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * s, y: oy + y * s) }
+
+        var p = Path()
+        // Body: rounded eraser end, both long edges, tiny rounded tip corner.
+        p.move(to: pt(21.174, 6.812))
+        p.addArc(center: pt(19.181, 4.819), radius: 2.819 * s,
+                 startAngle: .degrees(45), endAngle: .degrees(-135), clockwise: true)
+        p.addLine(to: pt(3.842, 16.174))
+        p.addArc(center: pt(5.254, 17.590), radius: 2 * s,
+                 startAngle: .degrees(-134.9), endAngle: .degrees(-163.0), clockwise: true)
+        p.addLine(to: pt(2.021, 21.356))
+        p.addArc(center: pt(2.500, 21.499), radius: 0.5 * s,
+                 startAngle: .degrees(-163.4), endAngle: .degrees(73.3), clockwise: true)
+        p.addLine(to: pt(6.997, 20.658))
+        p.addArc(center: pt(6.415, 18.745), radius: 2 * s,
+                 startAngle: .degrees(73.1), endAngle: .degrees(45.1), clockwise: true)
+        p.closeSubpath()
+        // Ferrule line separating tip from body.
+        p.move(to: pt(15, 5))
+        p.addLine(to: pt(19, 9))
+        return p
+    }
+}
+
+private enum QuickIcon {
+    case system(String, weight: Font.Weight)
+    case pencil
+}
+
 private struct QuickIconButton: View {
-    let system: String
-    /// SF's default strokes read wispy at 12pt for some glyphs (the pencil,
-    /// notably) — callers bump this to keep their icon's optical weight in
-    /// line with the row.
-    var weight: Font.Weight = .medium
+    let icon: QuickIcon
     let action: () -> Void
     @State private var hover = false
 
+    init(system: String, weight: Font.Weight = .medium, action: @escaping () -> Void) {
+        self.icon = .system(system, weight: weight)
+        self.action = action
+    }
+
+    init(icon: QuickIcon, action: @escaping () -> Void) {
+        self.icon = icon
+        self.action = action
+    }
+
     var body: some View {
         Button(action: action) {
-            Image(systemName: system)
-                .font(.system(size: 12, weight: weight))
+            glyph
                 .foregroundStyle(Palette.muted)
                 .frame(width: 26, height: 26)
                 .background(
@@ -2594,6 +2638,20 @@ private struct QuickIconButton: View {
         .buttonStyle(.plain)
         .onHover { hover = $0 }
         .handCursor()
+    }
+
+    @ViewBuilder
+    private var glyph: some View {
+        switch icon {
+        case .system(let name, let weight):
+            Image(systemName: name)
+                .font(.system(size: 12, weight: weight))
+        case .pencil:
+            // Lucide's native proportions: stroke 2 on a 24 box.
+            LucidePencilShape()
+                .stroke(style: StrokeStyle(lineWidth: 13 * 2 / 24, lineCap: .round, lineJoin: .round))
+                .frame(width: 13, height: 13)
+        }
     }
 }
 
