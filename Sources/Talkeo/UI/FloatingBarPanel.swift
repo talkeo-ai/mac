@@ -79,6 +79,15 @@ final class FloatingBarPanel {
     private var hoveredButton: String?
     /// shadcn-style tip beside the bar naming the hovered button.
     private let tooltip = BarTooltipPanel()
+    /// Stand-in cursor for while the mouse RESTS over the bar (see
+    /// `CursorFreezeOverlay`): re-asserting can't fully hide the active app's
+    /// periodic stomps, so at rest the real cursor is hidden and its pixels
+    /// are ours. Any move unfreezes before anything else runs.
+    private let cursorFreeze = CursorFreezeOverlay()
+    /// When the mouse last physically moved, so the freeze kicks in only at
+    /// rest — while moving, per-move re-asserts already mask the stomps.
+    private var lastMouseMoveAt: CFTimeInterval = 0
+    private static let freezeAfter: TimeInterval = 0.15
     /// Whether the panel already carries the per-window cursor tag (see
     /// `BackgroundCursor.tagWindow`). Tagging needs a live window number, so
     /// it's applied on show and retried until it takes.
@@ -153,14 +162,28 @@ final class FloatingBarPanel {
     /// arrow/hand strobe.
     private func installCursorMonitor() {
         removeCursorMonitor()
-        let global = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
-            self?.syncCursor()
+        // Drags included: they move the cursor but are NOT mouseMoved events,
+        // and a frozen (hidden) cursor must unfreeze the moment it moves.
+        let moves: NSEvent.EventTypeMask = [
+            .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+        ]
+        let global = NSEvent.addGlobalMonitorForEvents(matching: moves) { [weak self] _ in
+            self?.handleMouseMoved()
         }
-        let local = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            self?.syncCursor()
+        let local = NSEvent.addLocalMonitorForEvents(matching: moves) { [weak self] event in
+            self?.handleMouseMoved()
             return event
         }
         cursorMonitors = [global, local].compactMap { $0 }
+    }
+
+    /// A real mouse move: end any freeze FIRST (the real cursor must track
+    /// motion, never the stand-in), then sync as usual — which re-asserts the
+    /// right cursor in the same run-loop pass, so the swap is seamless.
+    private func handleMouseMoved() {
+        lastMouseMoveAt = CACurrentMediaTime()
+        cursorFreeze.unfreeze()
+        syncCursor()
     }
 
     private func removeCursorMonitor() {
@@ -187,6 +210,7 @@ final class FloatingBarPanel {
         let point = NSEvent.mouseLocation
         guard panel.isVisible, cursorRect.contains(point) else {
             stopCursorReassertTimer()
+            cursorFreeze.unfreeze()
             if cursorIsOverBar {
                 cursorIsOverBar = false
                 NSCursor.arrow.set()
@@ -198,10 +222,21 @@ final class FloatingBarPanel {
             return
         }
         cursorIsOverBar = true
+        // Frozen at rest: the stand-in owns the pixels; nothing to maintain
+        // until a move (handleMouseMoved) or an exit unfreezes.
+        if cursorFreeze.isFrozen { return }
         let local = barPoint(point)
         let hovered = model.buttons.first { $0.frame.contains(local) }
-        (hovered != nil ? NSCursor.pointingHand : NSCursor.arrow).set()
+        let cursor: NSCursor = hovered != nil ? .pointingHand : .arrow
+        cursor.set()
         updateTooltip(hovered)
+        if CACurrentMediaTime() - lastMouseMoveAt > Self.freezeAfter {
+            // At rest: swap to the stand-in and stop burning the timer — the
+            // app behind can now stomp the (hidden) cursor without effect.
+            cursorFreeze.freeze(cursor, at: point)
+            stopCursorReassertTimer()
+            return
+        }
         startCursorReassertTimer()
     }
 
