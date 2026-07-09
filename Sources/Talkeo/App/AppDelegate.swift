@@ -33,6 +33,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // "Full history" in the popover opens the app's Translate view with its
         // history drawer open.
         quickTranslate.onOpenFullHistory = { [weak self] in self?.mainWindow.openTranslateHistory() }
+        // "History" in Improve's compose opens the app's Improve view (past
+        // rewrites live there, not in the popover).
+        quickTranslate.onOpenImproveHistory = { [weak self] in self?.mainWindow.show(section: .improve) }
         // Restore persisted preferences before the first show, so an auto-hiding
         // bar starts retracted instead of flashing revealed.
         floatingBar.setAutoHide(settings.barAutoHide)
@@ -121,7 +124,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Reads the selection in the frontmost app and, if any, opens the improve
-    /// popover. Improve needs text, so with nothing selected it's a no-op.
+    /// popover. With nothing selected it opens improve's compose/history
+    /// instead, mirroring Translate.
     private func improveCurrentSelection() {
         let frontmost = NSWorkspace.shared.frontmostApplication
         // Capture terminal-ness now (the frontmost app owns the selection); it
@@ -131,6 +135,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 self.quickTranslate.improve(text: text, targetIsTerminal: isTerminal)
+            } else {
+                // Nothing selected — open the compose box + recent rewrites.
+                self.quickTranslate.showImproveHistory()
             }
         }
     }
