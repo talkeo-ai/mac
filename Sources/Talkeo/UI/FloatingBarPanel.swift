@@ -15,6 +15,10 @@ final class FloatingBarPanel {
     private let panel: NSPanel
     private let model: FloatingBarModel
 
+    /// Invoked when the user taps the Talkeo brand icon. The owner opens the
+    /// main app window.
+    var onOpenApp: (() -> Void)?
+
     /// Invoked when the user taps Translate. The owner reads the current
     /// selection and opens the translate panel.
     var onTranslate: (() -> Void)?
@@ -102,11 +106,13 @@ final class FloatingBarPanel {
         let model = FloatingBarModel()
         self.model = model
 
+        var onOpenAppRef: (() -> Void)?
         var onTranslateRef: (() -> Void)?
         var onImproveRef: (() -> Void)?
         var onListenRef: (() -> Void)?
         let view = FloatingBarView(
             model: model,
+            onOpenApp: { onOpenAppRef?() },
             onTranslate: { onTranslateRef?() },
             onImprove: { onImproveRef?() },
             onListen: { onListenRef?() }
@@ -139,6 +145,7 @@ final class FloatingBarPanel {
 
         // Acting on a button dismisses its tip right away (the popover the
         // action opens would otherwise appear under it).
+        onOpenAppRef = { [weak self] in self?.onOpenApp?() }
         onTranslateRef = { [weak self] in self?.tooltip.hide(); self?.onTranslate?() }
         onImproveRef = { [weak self] in self?.tooltip.hide(); self?.onImprove?() }
         onListenRef = { [weak self] in self?.tooltip.hide(); self?.onListen?() }
@@ -495,6 +502,7 @@ private struct BarButtonFramesKey: PreferenceKey {
 
 struct FloatingBarView: View {
     @ObservedObject var model: FloatingBarModel
+    var onOpenApp: () -> Void = {}
     var onTranslate: () -> Void = {}
     var onImprove: () -> Void = {}
     var onListen: () -> Void = {}
@@ -504,9 +512,14 @@ struct FloatingBarView: View {
 
     private var stack: some View {
         VStack(spacing: 5) {
-            FloatingBrandIcon()
-                .frame(width: 20, height: 20)
-                .padding(.bottom, 1)
+            Button(action: onOpenApp) {
+                FloatingBrandIcon()
+                    .frame(width: 20, height: 20)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Open Talkeo")
+            .padding(.bottom, 1)
 
             // Translate, Improve and Listen all act on the selection, so they light
             // up when there's text to work with. Capture (OCR) doesn't depend on it.
