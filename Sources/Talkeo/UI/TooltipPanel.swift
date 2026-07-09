@@ -247,7 +247,7 @@ struct TooltipView: View {
     private var menuView: some View {
         VStack(alignment: .leading, spacing: 0) {
             MenuRow(
-                kind: .system("camera.viewfinder"),
+                kind: .system("text.viewfinder"),
                 title: "Capture text",
                 subtitle: "OCR on a screen region"
             ) {
@@ -263,7 +263,7 @@ struct TooltipView: View {
             }
             Divider().opacity(0.4)
             MenuRow(
-                kind: .system("wand.and.stars"),
+                kind: .system("text.badge.checkmark"),
                 title: "Improve copy",
                 subtitle: "Polish the selected text"
             ) {
