@@ -1669,9 +1669,7 @@ struct QuickTranslateView: View {
             if let card = model.cards[term.text] {
                 ExplainCardView(
                     card: card,
-                    // The English side to read aloud: the term itself if it's
-                    // English, otherwise its English equivalent (first meaning).
-                    speakEnglish: term.sourceLang == "EN" ? card.term : (card.meanings.first ?? card.term),
+                    speakEnglish: ExplainCardText.spokenEnglish(term: term, card: card),
                     index: model.activeTermIndex ?? 0,
                     total: model.terms.count,
                     onPrev: { model.stepTerm(by: -1) },
@@ -1684,7 +1682,7 @@ struct QuickTranslateView: View {
                 cardError(error)
             } else {
                 cardLoadingHeader(term.text)
-                cardShimmer
+                ExplainCardShimmer()
             }
         }
     }
@@ -1734,24 +1732,6 @@ struct QuickTranslateView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Shaped like the card it's standing in for — a meanings line plus two
-    /// example pairs (the typical payload) — so the swap to real content is a
-    /// small settle, not a big grow. The headword above it is already real.
-    private var cardShimmer: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            shimmerBar(width: 230, height: 14)
-            VStack(alignment: .leading, spacing: 5) {
-                shimmerBar(width: 280, height: 12)
-                shimmerBar(width: 220, height: 11)
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                shimmerBar(width: 260, height: 12)
-                shimmerBar(width: 200, height: 11)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
     private func shimmerBar(width: CGFloat, height: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: 4, style: .continuous)
             .fill(Palette.elevated)
@@ -1775,7 +1755,7 @@ private struct ExplainCardView: View {
         VStack(alignment: .leading, spacing: 16) {
             headword
             if !card.examples.isEmpty { examples }
-            if let insight = card.insight { insightView(insight) }
+            if let insight = card.insight { ExplainInsightNote(insight: insight) }
             actions
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1833,26 +1813,8 @@ private struct ExplainCardView: View {
 
     // Examples: EN (term bold) over ES, stacked, with a Listen for the English.
     private var examples: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(card.examples.indices, id: \.self) { i in
-                let ex = card.examples[i]
-                HStack(alignment: .top, spacing: 6) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        markdownBold(ex.source)
-                            .font(.system(size: 14.5))
-                            .foregroundStyle(Palette.foreground)
-                            .lineSpacing(3)
-                            .fixedSize(horizontal: false, vertical: true)
-                        markdownBold(ex.target)
-                            .font(.system(size: 13.5))
-                            .foregroundStyle(Palette.muted)
-                            .lineSpacing(3)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 4)
-                    speakerButton(Self.plain(ex.source))
-                }
-            }
+        ExplainExamplesList(examples: card.examples) { english in
+            speakerButton(english)
         }
     }
 
@@ -1872,33 +1834,6 @@ private struct ExplainCardView: View {
         .handCursor()
     }
 
-    /// Strip markdown bold markers so the spoken text is clean.
-    private static func plain(_ string: String) -> String {
-        string.replacingOccurrences(of: "**", with: "")
-    }
-
-    private func insightView(_ insight: ExplainCard.Insight) -> some View {
-        let warning = insight.kind == .falseFriend
-        return HStack(alignment: .top, spacing: 8) {
-            Image(systemName: warning ? "exclamationmark.triangle.fill" : "lightbulb.fill")
-                .font(.system(size: 12))
-                .foregroundStyle(warning ? Color.orange.opacity(0.9) : Palette.tertiary)
-                .padding(.top, 1)
-            Text(insight.text)
-                .font(.system(size: 14))
-                .foregroundStyle(Palette.muted)
-                .lineSpacing(3)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Palette.elevated.opacity(0.6))
-        )
-    }
-
     private var actions: some View {
         HStack(spacing: 8) {
             Spacer()
@@ -1907,14 +1842,6 @@ private struct ExplainCardView: View {
             }
         }
         .padding(.top, 2)
-    }
-
-    /// Render markdown so the backend's `**term**` shows in bold (no italics).
-    private func markdownBold(_ string: String) -> Text {
-        if let attributed = try? AttributedString(markdown: string) {
-            return Text(attributed)
-        }
-        return Text(string)
     }
 
     private func cardPill(system: String, title: String, action: @escaping () -> Void) -> some View {
