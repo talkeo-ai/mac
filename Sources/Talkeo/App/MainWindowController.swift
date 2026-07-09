@@ -1004,7 +1004,7 @@ private struct ExplainCardPane: View {
                 SpeakerButton(english: term.sourceLang == "EN" ? card.term : (card.meanings.first ?? card.term))
             }
             if model.terms.count > 1 { pager }
-            PaneIconButton(system: "xmark", help: "Close", size: 24) { model.removeActiveTerm() }
+            PaneIconButton(system: "xmark", help: "Close", size: 28) { model.removeActiveTerm() }
         }
     }
 
@@ -1012,24 +1012,24 @@ private struct ExplainCardPane: View {
         HStack(spacing: 8) {
             Button(action: { model.stepTerm(by: -1) }) {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 11, weight: .bold))
-                    .frame(width: 18, height: 18)
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             Text("\((model.activeTermIndex ?? 0) + 1) / \(model.terms.count)")
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 13, weight: .medium))
                 .monospacedDigit()
             Button(action: { model.stepTerm(by: 1) }) {
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .frame(width: 18, height: 18)
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
         .foregroundStyle(Palette.muted)
-        .padding(.top, 4)
+        .padding(.top, 3)
     }
 
     /// Examples: term's side (term bolded) over the user's side, each pair
@@ -1038,7 +1038,9 @@ private struct ExplainCardPane: View {
         VStack(alignment: .leading, spacing: 14) {
             ForEach(card.examples.indices, id: \.self) { i in
                 let ex = card.examples[i]
-                HStack(alignment: .top, spacing: 6) {
+                // Center alignment: the speaker sits between the EN/ES lines,
+                // belonging to the pair rather than hanging off the first one.
+                HStack(alignment: .center, spacing: 6) {
                     VStack(alignment: .leading, spacing: 3) {
                         markdownBold(ex.source)
                             .font(.system(size: 15))
@@ -1138,7 +1140,7 @@ private struct SpeakerButton: View {
     let english: String
 
     var body: some View {
-        PaneIconButton(system: "speaker.wave.2", help: "Listen", size: 24) {
+        PaneIconButton(system: "speaker.wave.2", help: "Listen", size: 28) {
             Speaker.speak(english, lang: "EN")
         }
     }
