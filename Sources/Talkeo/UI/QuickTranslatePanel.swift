@@ -49,6 +49,10 @@ final class QuickTranslatePanel {
     /// that window can open to a specific section.
     var onOpenFullHistory: (() -> Void)?
 
+    /// "History" tapped in Improve's compose view — improve history lives in
+    /// the app, not the popover. Same wiring seam as `onOpenFullHistory`.
+    var onOpenImproveHistory: (() -> Void)?
+
     /// Fires with `true` when the popover comes on screen and `false` once it
     /// leaves, whatever the path (dismiss click, close button, Replace). The
     /// owner uses it to hold the floating bar revealed while we're open.
@@ -62,7 +66,10 @@ final class QuickTranslatePanel {
 
     private static let width: CGFloat = 400
     private static let nominalHeight: CGFloat = 170
-    private static let maxHeight: CGFloat = 600
+    /// Sized so Improve's tallest layout (two capped panes + correction card +
+    /// terminal caption + Replace bar) never clips; `frame(forHeight:)` still
+    /// clamps to the screen on small displays.
+    private static let maxHeight: CGFloat = 640
     /// Width the floating bar reserves at the right edge (its width + margin),
     /// so the popover tucks just to the left of it. Mirrors `FloatingBarPanel`.
     private static let barReservedWidth: CGFloat = 52 + 8
@@ -95,12 +102,14 @@ final class QuickTranslatePanel {
         var onCloseRef: (() -> Void)?
         var onReplaceRef: ((String) -> Void)?
         var onOpenFullHistoryRef: (() -> Void)?
+        var onOpenImproveHistoryRef: (() -> Void)?
         let view = QuickTranslateView(
             model: model,
             onResize: { onResizeRef?($0) },
             onClose: { onCloseRef?() },
             onReplace: { onReplaceRef?($0) },
-            onOpenFullHistory: { onOpenFullHistoryRef?() }
+            onOpenFullHistory: { onOpenFullHistoryRef?() },
+            onOpenImproveHistory: { onOpenImproveHistoryRef?() }
         )
         let hosting = FirstMouseHostingView(rootView: view)
         hosting.frame = NSRect(origin: .zero, size: NSSize(width: Self.width, height: Self.nominalHeight))
@@ -111,6 +120,13 @@ final class QuickTranslatePanel {
         onCloseRef = { [weak self] in self?.hide() }
         onReplaceRef = { [weak self] text in self?.performReplace(text) }
         onOpenFullHistoryRef = { [weak self] in self?.onOpenFullHistory?() }
+        // Navigating to the app supersedes the popover — hide it so it isn't
+        // left floating over the main window (its dismiss monitor only sees
+        // clicks on OTHER apps, so it wouldn't go away on its own).
+        onOpenImproveHistoryRef = { [weak self] in
+            self?.hide()
+            self?.onOpenImproveHistory?()
+        }
     }
 
     func show(text: String) {
@@ -133,9 +149,27 @@ final class QuickTranslatePanel {
 
     /// Improve tapped with text selected — rewrite it natively and show the diff.
     /// `targetIsTerminal` flips Replace into a safe Copy (terminals can't be
-    /// edited in place).
+    /// edited in place). Re-tapping for the text already on screen toggles the
+    /// popover closed, same as Translate.
     func improve(text: String, targetIsTerminal: Bool = false) {
+        if panel.isVisible, model.mode == .improve,
+           model.sourceText == text.trimmingCharacters(in: .whitespacesAndNewlines) {
+            hide()
+            return
+        }
         model.improve(text, targetIsTerminal: targetIsTerminal)
+        present()
+    }
+
+    /// Improve tapped with nothing selected — show the compose box + recent
+    /// rewrites. A bare tap while the popover is already open (whatever it
+    /// shows) reads as "close it", so it toggles off instead of switching.
+    func showImproveHistory() {
+        if panel.isVisible {
+            hide()
+            return
+        }
+        model.showImproveHistory()
         present()
     }
 
@@ -163,6 +197,14 @@ final class QuickTranslatePanel {
     /// replacer do its thing (AX write first, clipboard + ⌘V fallback).
     private func performReplace(_ text: String) {
         guard !text.isEmpty else { return }
+        // Typed/history rewrites have no selection anywhere to write back into —
+        // pasting into whatever app happened to be behind would be a stray edit.
+        // The button reads "Copy" in this state; behave accordingly.
+        if model.improveFromCompose {
+            replacer.copyToClipboard(text)
+            closeImmediately()
+            return
+        }
         let target = previousApp ?? NSWorkspace.shared.frontmostApplication
         // Terminals: the selection is copy-only and decoupled from the editable
         // input, and AX exposes the whole scrollback (not a logical input line), so
@@ -358,9 +400,10 @@ final class QuickTranslateModel: ObservableObject {
     var cardErrors: [String: String] { session.cardErrors }
 
     /// Translate view vs. the local history list (shown when Translate is tapped
-    /// with nothing selected) vs. the improve view (native rewrite + diff) vs. the
-    /// listen view (TTS playback + select-to-hear).
-    enum Mode { case translate, history, improve, listen }
+    /// with nothing selected) vs. the improve view (native rewrite + diff) vs.
+    /// improve's own compose/history (Improve tapped with nothing selected) vs.
+    /// the listen view (TTS playback + select-to-hear).
+    enum Mode { case translate, history, improve, improveHistory, listen }
     @Published var mode: Mode = .translate
     @Published var historyEntries: [HistoryEntry] = []
 
@@ -398,6 +441,10 @@ final class QuickTranslateModel: ObservableObject {
     /// True when the text came from a terminal (select-to-copy, not editable), so
     /// Replace degrades to a safe Copy instead of editing in place.
     @Published var targetIsTerminal: Bool = false
+    /// True when the improved text came from typing/history rather than a live
+    /// selection — there's nothing to write back into, so the action is a plain
+    /// Copy (without the terminal caveat: nothing was replaceable to begin with).
+    @Published var improveFromCompose: Bool = false
 
     /// When true the detected (source) box is an editable input: typing changes
     /// the text and selecting does not mark terms; confirming re-translates.
@@ -466,11 +513,17 @@ final class QuickTranslateModel: ObservableObject {
 
     private let client: TransformClient
     private let history: HistoryStore
+    private let improveHistory: ImproveHistoryStore
     private var task: Task<Void, Never>?
 
-    init(client: TransformClient = TalkeoTransformClient(), history: HistoryStore = LocalHistoryStore.shared) {
+    init(
+        client: TransformClient = TalkeoTransformClient(),
+        history: HistoryStore = LocalHistoryStore.shared,
+        improveHistory: ImproveHistoryStore = LocalImproveHistoryStore.shared
+    ) {
         self.client = client
         self.history = history
+        self.improveHistory = improveHistory
         // Card arrival animates exactly as it used to when the load lived here.
         self.session = ExplainSession(client: client, cardAnimation: .easeOut(duration: 0.2))
         sessionChanges = session.objectWillChange.sink { [weak self] _ in
@@ -579,21 +632,27 @@ final class QuickTranslateModel: ObservableObject {
 
     /// Rewrite `text` into more native English and load the structured changes.
     /// One short JSON call (not a stream), mirroring `translate(_:)`'s structure.
-    func improve(_ text: String, targetIsTerminal: Bool = false) {
+    /// Animated for the same reason as `translate(_:)`: the original card is one
+    /// persistent view bound to `sourceText`, so committing from the compose box
+    /// updates it in place instead of swapping the view tree.
+    func improve(_ text: String, targetIsTerminal: Bool = false, fromCompose: Bool = false) {
         task?.cancel()
         clearSelection()
-        mode = .improve
-        sourceEditing = false
-        self.targetIsTerminal = targetIsTerminal
-        sourceText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        improveResult = nil
-        dismissedChangeIDs = []
-        activeChangeIndex = 0
+        withAnimation(.easeInOut(duration: 0.22)) {
+            mode = .improve
+            sourceEditing = false
+            self.targetIsTerminal = targetIsTerminal
+            improveFromCompose = fromCompose
+            sourceText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            improveResult = nil
+            dismissedChangeIDs = []
+            activeChangeIndex = 0
 
-        // Improve always rewrites English; detection picks the explanation
-        // language (the user's own — the other of the EN/ES pair).
-        detectedLang = QuickTranslateModel.detectLanguage(sourceText)
-        translateLang = detectedLang == "EN" ? "ES" : "EN"
+            // Improve always rewrites English; detection picks the explanation
+            // language (the user's own — the other of the EN/ES pair).
+            detectedLang = QuickTranslateModel.detectLanguage(sourceText)
+            translateLang = detectedLang == "EN" ? "ES" : "EN"
+        }
 
         guard !sourceText.isEmpty else { improvePhase = .idle; return }
         improvePhase = .streaming
@@ -608,6 +667,7 @@ final class QuickTranslateModel: ObservableObject {
                     self.improveResult = result
                     self.improvePhase = .done
                 }
+                self.recordImproveHistory(result)
             } catch {
                 guard !Task.isCancelled else { return }
                 self.improvePhase = .failed(QuickTranslateModel.message(error))
@@ -615,7 +675,53 @@ final class QuickTranslateModel: ObservableObject {
         }
     }
 
-    func retryImprove() { improve(sourceText) }
+    func retryImprove() {
+        improve(sourceText, targetIsTerminal: targetIsTerminal, fromCompose: improveFromCompose)
+    }
+
+    /// Make the original editable in place (drops the stale diff highlights —
+    /// editing invalidates their offsets); confirming re-runs the rewrite.
+    /// Improve's counterpart of `beginEdit`.
+    func beginImproveEdit() {
+        task?.cancel()
+        clearSelection()
+        sourceEditing = true
+    }
+
+    /// Switch the popover into improve's compose view (Improve tapped with no
+    /// text): an empty editable card to type into. Past rewrites live in the
+    /// app's Improve screen (the compose bar links there), not inline. The
+    /// original card binds straight to `sourceText`, so it has to be cleared
+    /// here, same as `showHistory()`.
+    func showImproveHistory() {
+        task?.cancel()
+        clearSelection()
+        sourceEditing = false
+        sourceText = ""
+        improveResult = nil
+        improvePhase = .idle
+        dismissedChangeIDs = []
+        activeChangeIndex = 0
+        improveFromCompose = true
+        targetIsTerminal = false
+        mode = .improveHistory
+    }
+
+    /// Save the finished rewrite locally — the app's Improve screen reads this
+    /// store to show/reopen past rewrites (the entry carries the full changes,
+    /// so restoring needs no API call). Already-natural results are skipped —
+    /// a "text → same text" row teaches nothing.
+    private func recordImproveHistory(_ result: ImproveResult) {
+        let src = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !src.isEmpty, !result.changes.isEmpty else { return }
+        improveHistory.add(ImproveHistoryEntry(
+            id: UUID().uuidString,
+            source: src,
+            improved: result.improved.trimmingCharacters(in: .whitespacesAndNewlines),
+            changes: result.changes,
+            timestamp: Date()
+        ))
+    }
 
     /// Changes the user hasn't dismissed — the set the pager moves through.
     var activeChanges: [ImproveResult.Change] {
@@ -637,10 +743,14 @@ final class QuickTranslateModel: ObservableObject {
     }
 
     /// Page between corrections (wraps, like the explain card's ‹ › pager).
+    /// Animated so the card cross-fades and its height settles smoothly, same
+    /// as `stepTerm`.
     func stepChange(by delta: Int) {
         let count = activeChanges.count
         guard count > 0 else { return }
-        activeChangeIndex = (activeChangeIndex + delta + count) % count
+        withAnimation(.easeInOut(duration: 0.22)) {
+            activeChangeIndex = (activeChangeIndex + delta + count) % count
+        }
     }
 
     /// Reject a correction: it leaves the pager and its source highlight clears
@@ -765,12 +875,18 @@ final class QuickTranslateModel: ObservableObject {
         sourceEditing = true
     }
 
-    /// Confirm the edit and re-translate the (possibly changed) text.
+    /// Confirm the edit and re-run the mode's transform on the (possibly
+    /// changed) text. In improve the write-back context is preserved: fixing a
+    /// typo in the source still targets the original selection.
     func commitEdit() {
         let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         sourceEditing = false
         guard !text.isEmpty else { return }
-        translate(text)
+        if mode == .improve {
+            improve(text, targetIsTerminal: targetIsTerminal, fromCompose: improveFromCompose)
+        } else {
+            translate(text)
+        }
     }
 
     private func reveal() {
@@ -864,6 +980,8 @@ struct QuickTranslateView: View {
     var onReplace: (String) -> Void = { _ in }
     /// "Full history" tapped — open the main app's History/Transcript screen.
     var onOpenFullHistory: () -> Void = {}
+    /// "History" tapped in Improve's compose — open the app's Improve screen.
+    var onOpenImproveHistory: () -> Void = {}
     @State private var sourceHeight: CGFloat = QuickTranslateView.textBoxMinHeight
     @State private var targetHeight: CGFloat = QuickTranslateView.textBoxMinHeight
     /// Measured natural height of the improve correction card, so it scrolls
@@ -874,7 +992,12 @@ struct QuickTranslateView: View {
     /// visible for the currently-paged correction; `drawMarkers` dims the rest.
     private static let diffColor = NSColor.systemRed.withAlphaComponent(0.32)
     /// Cap for the correction card; taller (sentence-level) corrections scroll.
-    private static let cardMaxHeight: CGFloat = 168
+    private static let cardMaxHeight: CGFloat = 150
+    /// ~4 lines — tighter than the translate panes because Improve stacks two
+    /// text boxes PLUS the correction card and the Replace bar under the
+    /// panel's height cap. Long text scrolls inside the box; Improve is a
+    /// quick glance, not a reader.
+    private static let improvePaneMaxHeight: CGFloat = 94
     /// Width text lays out at inside a `cardChrome()` box: content width (368)
     /// minus the card's own horizontal padding (12 × 2).
     static let cardTextWidth: CGFloat = width - 32 - 24
@@ -895,7 +1018,7 @@ struct QuickTranslateView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if model.mode == .improve {
+            if model.mode == .improve || model.mode == .improveHistory {
                 improveView
             } else if model.mode == .listen {
                 listenView
@@ -1054,6 +1177,21 @@ struct QuickTranslateView: View {
             .foregroundStyle(Palette.tertiary)
     }
 
+    /// The popover's standard close affordance (one look everywhere): a circled
+    /// xmark at the trailing end of the header row.
+    private var closeButton: some View {
+        Button(action: onClose) {
+            Image(systemName: "xmark")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(Palette.muted)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Palette.elevated))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .handCursor()
+    }
+
     // MARK: History ⇄ translate result (shown with nothing selected)
 
     /// The header above the source card, plus what's below it. Only the
@@ -1113,16 +1251,7 @@ struct QuickTranslateView: View {
                     pb.setString(model.targetText, forType: .string)
                 }
             }
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Palette.muted)
-                    .frame(width: 26, height: 26)
-                    .background(Circle().fill(Palette.elevated))
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .handCursor()
+            closeButton
         }
         .frame(height: 26)
 
@@ -1367,45 +1496,166 @@ struct QuickTranslateView: View {
 
     // MARK: Improve (native rewrite + compact, scannable changes)
 
+    /// The header above the original card, plus what's below it. Mirrors
+    /// `sourceCardSection`'s persistent-viewport pattern: the card is ONE view
+    /// bound to `sourceText` across compose ⇄ result ⇄ editing, so switching
+    /// states reads as the box updating in place, never a view swap.
     @ViewBuilder
     private var improveView: some View {
-        // Original, with the changed fragments tinted red (the diff).
+        let composing = model.mode == .improveHistory
+
+        HStack(alignment: .center) {
+            if composing {
+                Text("Improve")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Palette.foreground)
+            } else {
+                cardLabel("Original")
+            }
+            Spacer()
+            if !composing {
+                QuickIconButton(icon: model.sourceEditing ? .system("checkmark", weight: .bold) : .pencil) {
+                    if model.sourceEditing { model.commitEdit() } else { model.beginImproveEdit() }
+                }
+                if !model.sourceText.isEmpty, !model.sourceEditing {
+                    // Improve is English-in, English-out — the source is safe to read aloud.
+                    QuickIconButton(system: "speaker.wave.2") {
+                        Speaker.speak(model.sourceText, lang: "EN")
+                    }
+                    QuickIconButton(system: "doc.on.doc") {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(model.sourceText, forType: .string)
+                    }
+                }
+            }
+            closeButton
+        }
+        .frame(height: 26)
+
+        improveSourceCard
+
+        if composing {
+            improveComposeBar
+        } else if !model.sourceEditing {
+            Divider().overlay(Palette.border).opacity(0.6)
+            improveResultSection
+        }
+    }
+
+    /// Under the compose box: past rewrites live in the app (not inline like
+    /// Translate's recents), so "Full history" on the left jumps there, and
+    /// the primary "Improve ⏎" action sits on the right (Return in the box
+    /// does the same). Same row language as Listen's compose.
+    private var improveComposeBar: some View {
+        let hasText = !model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return HStack(spacing: 10) {
+            // Goes to the app's Improve history (no inline list here — the
+            // popover stays a quick compose surface).
+            Button(action: onOpenImproveHistory) {
+                HStack(spacing: 4) {
+                    Text("Full history")
+                        .font(.system(size: 12, weight: .medium))
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundStyle(Palette.muted)
+            }
+            .buttonStyle(.plain)
+            .handCursor()
+
+            Spacer()
+
+            Button(action: commitImproveCompose) {
+                HStack(spacing: 6) {
+                    Text("Improve")
+                        .font(.system(size: 13, weight: .semibold))
+                    // Return-key hint: pressing Return in the box above does
+                    // the same thing as tapping this button.
+                    Text("⏎")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.white.opacity(0.18)))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(Capsule().fill(Color.accentColor))
+                // `.disabled` alone wouldn't dim a custom-styled button (no
+                // standard control to read `isEnabled`) — fade it explicitly.
+                .opacity(hasText ? 1 : 0.4)
+            }
+            .buttonStyle(.plain)
+            .disabled(!hasText)
+            .handCursor()
+        }
+        .padding(.top, 2)
+    }
+
+    /// Shared by the compose box's Return-to-commit and the explicit Improve
+    /// button — same trim-guard-run shape as the other compose flows.
+    private func commitImproveCompose() {
+        let trimmed = model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        model.improve(trimmed, fromCompose: true)
+    }
+
+    /// The one persistent text box for the text being improved: empty and
+    /// editable in compose (Improve tapped with nothing selected), then showing
+    /// the original with the changed fragments tinted red once the rewrite
+    /// lands (tap the pencil to edit and re-run). Improve's `sourceCard`.
+    @ViewBuilder
+    private var improveSourceCard: some View {
+        let editing = model.mode == .improveHistory || model.sourceEditing
+        ZStack(alignment: .topLeading) {
+            SelectableText(
+                text: model.sourceText,
+                height: $sourceHeight,
+                width: QuickTranslateView.cardTextWidth,
+                maxHeight: QuickTranslateView.improvePaneMaxHeight,
+                minHeight: QuickTranslateView.textBoxMinHeight,
+                highlights: model.improveHighlights(),
+                highlightColor: QuickTranslateView.diffColor,
+                isEditable: editing,
+                onTextChange: { model.sourceText = $0 },
+                onCommit: {
+                    if model.mode == .improveHistory {
+                        commitImproveCompose()
+                    } else {
+                        model.commitEdit()
+                    }
+                }
+            ) { _, _ in }
+            .frame(height: sourceHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if editing, model.sourceText.isEmpty {
+                Text("Type or paste English to improve…")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Palette.tertiary)
+                    .allowsHitTesting(false)
+            }
+        }
+        .cardChrome()
+    }
+
+    /// Everything below the original once a rewrite is in flight or landed.
+    /// The whole layout — Improved pane, correction-card slot, Replace bar —
+    /// is present from the skeleton on, so the result arrives as a reveal
+    /// (cross-fade in place), not a stack of new sections pushing in.
+    @ViewBuilder
+    private var improveResultSection: some View {
+        let result = model.improveResult
+
+        // Improved pane: icons appear with the text but their row height is
+        // reserved from the start (same no-shift pattern as the translation).
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                cardLabel("Original")
+                cardLabel("Improved")
                 Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Palette.muted)
-                        .frame(width: 20, height: 20)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .handCursor()
-            }
-            improvePaneText(
-                model.sourceText,
-                height: $sourceHeight,
-                highlights: model.improveHighlights(),
-                highlightColor: QuickTranslateView.diffColor
-            )
-        }
-
-        if model.improvePhase == .streaming {
-            Divider().overlay(Palette.border).opacity(0.6)
-            improveLoading
-        } else if case let .failed(message) = model.improvePhase {
-            Divider().overlay(Palette.border).opacity(0.6)
-            improveError(message)
-        } else if let result = model.improveResult {
-            Divider().overlay(Palette.border).opacity(0.6)
-
-            // Improved, with Listen (always English) + copy.
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    cardLabel("Improved")
-                    Spacer()
+                if let result {
                     QuickIconButton(system: "speaker.wave.2") { Speaker.speak(result.improved, lang: "EN") }
                     QuickIconButton(system: "doc.on.doc") {
                         let pb = NSPasteboard.general
@@ -1413,57 +1663,115 @@ struct QuickTranslateView: View {
                         pb.setString(result.improved, forType: .string)
                     }
                 }
-                improvePaneText(result.improved, height: $targetHeight, highlights: [], highlightColor: nil)
             }
+            .frame(height: 26)
+            .animation(.easeOut(duration: 0.2), value: result == nil)
+            improvedPaneContent
+                .cardChrome()
+        }
 
-            if model.improveAlreadyNatural {
-                alreadyNatural
-            } else {
-                let changes = model.activeChanges
-                if let active = model.activeChange {
-                    Divider().overlay(Palette.border).opacity(0.6)
+        if case .failed = model.improvePhase {
+            // The pane itself shows the error + retry; nothing below applies.
+            EmptyView()
+        } else {
+            Divider().overlay(Palette.border).opacity(0.6)
+
+            if let result {
+                if model.improveAlreadyNatural {
+                    alreadyNatural
+                } else if let active = model.activeChange {
+                    let changes = model.activeChanges
                     ScrollView(.vertical, showsIndicators: true) {
-                        changeCard(active, index: min(model.activeChangeIndex, changes.count - 1), total: changes.count)
-                            .background(
-                                GeometryReader { geo in
-                                    Color.clear.preference(key: ImproveCardHeightKey.self, value: geo.size.height)
-                                }
-                            )
+                        // The ZStack keeps the outgoing and incoming cards
+                        // overlapped while paging/dismissing cross-fades them
+                        // (the model steps inside withAnimation) — as direct
+                        // scroll content they'd stack vertically mid-transition.
+                        ZStack(alignment: .topLeading) {
+                            changeCard(active, index: min(model.activeChangeIndex, changes.count - 1), total: changes.count)
+                                .id(active.id)
+                                .transition(.opacity)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear.preference(key: ImproveCardHeightKey.self, value: geo.size.height)
+                            }
+                        )
                     }
                     .frame(height: min(max(cardHeight, 1), QuickTranslateView.cardMaxHeight))
-                    .onPreferenceChange(ImproveCardHeightKey.self) { cardHeight = $0 }
+                    .onPreferenceChange(ImproveCardHeightKey.self) { h in
+                        // Animated so the slot's height settles with the card
+                        // swap instead of snapping to the new card's size.
+                        withAnimation(.easeOut(duration: 0.18)) { cardHeight = h }
+                    }
                 } else {
-                    Divider().overlay(Palette.border).opacity(0.6)
                     allDismissedNote
                 }
+                replaceBar(result.improved, ready: true)
+            } else {
+                changeCardSkeleton
+                replaceBar("", ready: false)
             }
-
-            replaceBar(result.improved)
         }
     }
 
+    /// The Improved box's content: skeleton while the rewrite is in flight,
+    /// cross-fading (opacity + blur, `translate`'s reveal) to the text — the
+    /// model sets the result inside `withAnimation`, so keying both sides to it
+    /// runs the swap in one transaction. Failure renders in the same box.
     @ViewBuilder
-    private func improvePaneText(
-        _ text: String,
-        height: Binding<CGFloat>,
-        highlights: [(range: NSRange, active: Bool)],
-        highlightColor: NSColor?
-    ) -> some View {
-        SelectableText(
-            text: text,
-            height: height,
-            width: QuickTranslateView.width - 32,
-            // Keep the panes compact — Improve is a quick glance, not a reader.
-            // Long text scrolls inside the box so the correction card stays visible.
-            maxHeight: 116,
-            highlights: highlights,
-            highlightColor: highlightColor,
-            isEditable: false,
-            onTextChange: { _ in },
-            onCommit: {}
-        ) { _, _ in }
-            .frame(height: height.wrappedValue)
-            .frame(maxWidth: .infinity, alignment: .leading)
+    private var improvedPaneContent: some View {
+        if case let .failed(message) = model.improvePhase {
+            improveError(message)
+        } else {
+            let revealed = model.improveResult != nil
+            ZStack(alignment: .topLeading) {
+                SelectableText(
+                    text: model.improveResult?.improved ?? "",
+                    height: $targetHeight,
+                    width: QuickTranslateView.cardTextWidth,
+                    maxHeight: QuickTranslateView.improvePaneMaxHeight,
+                    minHeight: QuickTranslateView.textBoxMinHeight,
+                    isEditable: false,
+                    onTextChange: { _ in },
+                    onCommit: {}
+                ) { _, _ in }
+                .frame(height: targetHeight)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .opacity(revealed ? 1 : 0)
+                .blur(radius: revealed ? 0 : 5)
+
+                if !revealed {
+                    // Sized to sit within the reserved `textBoxMinHeight`, so
+                    // short rewrites land with no shift.
+                    VStack(alignment: .leading, spacing: 8) {
+                        shimmerBar(width: 220, height: 12)
+                        shimmerBar(width: 150, height: 12)
+                    }
+                    .padding(.top, 4)
+                }
+            }
+        }
+    }
+
+    /// Shaped like the correction card it stands in for — the `original →
+    /// fixed` line and a why line, on the same elevated box — so the card
+    /// landing is a settle, not a grow.
+    private var changeCardSkeleton: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            shimmerBar(width: 200, height: 13)
+            VStack(alignment: .leading, spacing: 5) {
+                shimmerBar(width: 280, height: 11)
+                shimmerBar(width: 230, height: 11)
+            }
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Palette.elevated.opacity(0.45))
+        )
     }
 
     /// One correction at a time: `original → fixed`, a ‹ › pager when there are
@@ -1568,12 +1876,19 @@ struct QuickTranslateView: View {
             .foregroundStyle(Palette.tertiary)
     }
 
-    private func replaceBar(_ improved: String) -> some View {
+    /// `ready: false` reserves the bar's space while the rewrite is in flight
+    /// (button invisible + disabled), so the result fades it in with no shift.
+    /// Compose/history rewrites have no live selection to write back into, so
+    /// their action is a plain Copy — without the terminal caveat, since
+    /// nothing was replaceable to begin with.
+    private func replaceBar(_ improved: String, ready: Bool) -> some View {
         let terminal = model.targetIsTerminal
+        let copyOnly = terminal || model.improveFromCompose
         return VStack(alignment: .leading, spacing: 7) {
             if terminal {
                 // Terminals can't be edited in place (copy-only selection); be
                 // honest — Replace copies and the user pastes where they mean to.
+                // Terminal-ness is known before the result, so this never pops in.
                 Text("Terminal: can't replace in place. This copies the improved text — paste it (⌘V) where you want it.")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.tertiary)
@@ -1584,9 +1899,9 @@ struct QuickTranslateView: View {
                 Spacer()
                 Button(action: { onReplace(improved) }) {
                     HStack(spacing: 6) {
-                        Image(systemName: terminal ? "doc.on.clipboard" : "arrow.down.doc")
+                        Image(systemName: copyOnly ? "doc.on.clipboard" : "arrow.down.doc")
                             .font(.system(size: 12, weight: .semibold))
-                        Text(terminal ? "Copy" : "Replace").font(.system(size: 13, weight: .semibold))
+                        Text(copyOnly ? "Copy" : "Replace").font(.system(size: 13, weight: .semibold))
                     }
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14)
@@ -1594,22 +1909,13 @@ struct QuickTranslateView: View {
                     .background(Capsule().fill(Color.accentColor))
                 }
                 .buttonStyle(.plain)
-                .help(terminal ? "Copy the improved text to paste it yourself" : "Replace the selection with the improved text")
+                .disabled(!ready)
+                .opacity(ready ? 1 : 0)
+                .help(copyOnly ? "Copy the improved text to paste it yourself" : "Replace the selection with the improved text")
                 .handCursor()
             }
         }
         .padding(.top, 2)
-    }
-
-    private var improveLoading: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Improving…")
-                .font(.system(size: 12.5))
-                .foregroundStyle(Palette.tertiary)
-            shimmerBar(width: 220, height: 12)
-            shimmerBar(width: 180, height: 12)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func improveError(_ message: String) -> some View {
@@ -2505,6 +2811,14 @@ private struct QuickPreviewHistoryStore: HistoryStore {
     func clear() {}
 }
 
+/// No-op store so previews never write to the real improve history on disk.
+private struct QuickPreviewImproveHistoryStore: ImproveHistoryStore {
+    func all() -> [ImproveHistoryEntry] { [] }
+    func add(_ entry: ImproveHistoryEntry) {}
+    func remove(id: String) {}
+    func clear() {}
+}
+
 #Preview("History") {
     let stub = QuickPreviewHistoryStore(entries: [
         HistoryEntry(id: "1", source: "The committee reached a tentative agreement.", target: "El comité alcanzó un acuerdo tentativo.", detectedLang: "EN", translateLang: "ES", timestamp: Date(timeIntervalSinceNow: -120)),
@@ -2519,10 +2833,17 @@ private struct QuickPreviewHistoryStore: HistoryStore {
 }
 
 #Preview("Improve") {
-    let model = QuickTranslateModel(client: QuickPreviewClient())
+    let model = QuickTranslateModel(client: QuickPreviewClient(), improveHistory: QuickPreviewImproveHistoryStore())
     return QuickTranslateView(model: model, onResize: { _ in }, onClose: {}, onReplace: { _ in })
         .padding(40)
         .onAppear {
             model.improve("I'm about to train, but it happens that I didn't get to finish this improvements.")
         }
+}
+
+#Preview("Improve compose") {
+    let model = QuickTranslateModel(client: QuickPreviewClient(), improveHistory: QuickPreviewImproveHistoryStore())
+    return QuickTranslateView(model: model, onResize: { _ in }, onClose: {}, onReplace: { _ in })
+        .padding(40)
+        .onAppear { model.showImproveHistory() }
 }
