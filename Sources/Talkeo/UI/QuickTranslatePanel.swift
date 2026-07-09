@@ -655,18 +655,6 @@ final class QuickTranslateModel: ObservableObject {
         translate(text)
     }
 
-    /// Open an empty editable input to translate something from scratch.
-    func startBlank() {
-        task?.cancel()
-        clearSelection()
-        mode = .translate
-        sourceText = ""
-        targetText = ""
-        revealed = false
-        phase = .idle
-        sourceEditing = true
-    }
-
     private func reveal() {
         guard !revealed else { return }
         withAnimation(.easeOut(duration: 0.3)) { revealed = true }
@@ -1000,14 +988,16 @@ struct QuickTranslateView: View {
     private static let recentHistoryCount = 5
 
     private var historyView: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                cardLabel("History")
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center) {
+                Text("History")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Palette.foreground)
                 Spacer()
                 if !model.historyEntries.isEmpty {
                     Button(action: { model.clearHistory() }) {
                         Text("Clear")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(Palette.muted)
                     }
                     .buttonStyle(.plain)
@@ -1015,24 +1005,26 @@ struct QuickTranslateView: View {
                 }
                 Button(action: onClose) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(Palette.muted)
-                        .frame(width: 20, height: 20)
-                        .contentShape(Rectangle())
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Palette.elevated))
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .handCursor()
             }
 
-            NewTranslationRow(action: { model.startBlank() })
+            // Type straight into the list — no extra click to reach an editor.
+            HistoryComposeInput(onSubmit: { model.translate($0) })
 
             if model.historyEntries.isEmpty {
                 Text("No translations yet.")
-                    .font(.system(size: 12.5))
+                    .font(.system(size: 13))
                     .foregroundStyle(Palette.tertiary)
                     .padding(.vertical, 2)
             } else {
-                Divider().overlay(Palette.border).opacity(0.4)
+                Divider().overlay(Palette.border).opacity(0.5)
                 let recent = Array(model.historyEntries.prefix(QuickTranslateView.recentHistoryCount))
                 VStack(spacing: 0) {
                     ForEach(Array(recent.enumerated()), id: \.element.id) { index, entry in
@@ -1060,15 +1052,15 @@ struct QuickTranslateView: View {
         }) {
             HStack(spacing: 4) {
                 Text("Full history")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 12.5, weight: .medium))
                 Image(systemName: "arrow.up.right")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 10.5, weight: .semibold))
             }
-            .foregroundStyle(Palette.muted)
+            .foregroundStyle(Color.accentColor)
         }
         .buttonStyle(.plain)
         .handCursor()
-        .padding(.top, 4)
+        .padding(.top, 6)
     }
 
     // MARK: Listen (TTS playback + select-to-hear, no explanations)
@@ -1988,33 +1980,30 @@ private struct HistoryRow: View {
         // A real Button (not onTapGesture) so the first click registers even
         // when the panel isn't key — tap gestures ignore acceptsFirstMouse.
         Button(action: onOpen) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(entry.source)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(Palette.foreground)
+                    .lineLimit(1)
+                HStack(spacing: 5) {
                     Text("\(entry.detectedLang) → \(entry.translateLang)")
-                        .font(.system(size: 9.5, weight: .semibold))
-                        .tracking(0.4)
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Palette.tertiary)
-                    Spacer()
+                    Text("·")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Palette.tertiary)
                     Text(HistoryRow.relative(entry.timestamp))
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(Palette.tertiary)
                         .opacity(hover ? 0 : 1)
                 }
-                Text(entry.source)
-                    .font(.system(size: 13.5, weight: .medium))
-                    .foregroundStyle(Palette.foreground)
-                    .lineLimit(1)
-                Text(entry.target)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Palette.muted)
-                    .lineLimit(1)
             }
-            .padding(.vertical, 9)
+            .padding(.vertical, 11)
             .padding(.horizontal, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(hover ? Palette.elevated.opacity(0.35) : Color.clear)
+                    .fill(hover ? Palette.elevated.opacity(0.4) : Color.clear)
             )
             .contentShape(Rectangle())
         }
@@ -2024,17 +2013,17 @@ private struct HistoryRow: View {
             if hover {
                 Button(action: onDelete) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Palette.muted)
-                        .frame(width: 18, height: 18)
+                        .frame(width: 20, height: 20)
                         .background(Circle().fill(Palette.elevated))
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .help("Remove")
                 .handCursor()
-                .padding(.top, 9)
-                .padding(.trailing, 4)
+                .padding(.top, 8)
+                .padding(.trailing, 2)
             }
         }
         .onHover { hover = $0 }
@@ -2047,36 +2036,42 @@ private struct HistoryRow: View {
     }
 }
 
-/// Flat "start fresh" row atop the history list — matches the list rows below
-/// instead of standing out as a filled button, for a quieter, more minimal menu.
-private struct NewTranslationRow: View {
-    let action: () -> Void
-    @State private var hover = false
+/// Always-on compose bar atop the history list — typing and hitting Return
+/// translates immediately, no extra click into a separate editor first.
+/// Auto-focuses on appear (history is the empty-selection entry point, so the
+/// moment it opens is exactly when someone wants to start typing).
+private struct HistoryComposeInput: View {
+    let onSubmit: (String) -> Void
+    @State private var text: String = ""
+    @FocusState private var focused: Bool
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: "plus")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Palette.foreground)
-                    .frame(width: 20, height: 20)
-                    .background(Circle().fill(Palette.elevated))
-                Text("New translation")
-                    .font(.system(size: 13.5, weight: .medium))
-                    .foregroundStyle(Palette.foreground)
-                Spacer(minLength: 0)
-            }
-            .padding(.vertical, 6)
-            .padding(.horizontal, 4)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(hover ? Palette.elevated.opacity(0.35) : Color.clear)
-            )
-            .contentShape(Rectangle())
+        HStack(spacing: 8) {
+            Image(systemName: "character.bubble")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Palette.tertiary)
+            TextField("Translate something…", text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 15))
+                .foregroundStyle(Palette.foreground)
+                .focused($focused)
+                .onSubmit {
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    onSubmit(trimmed)
+                }
         }
-        .buttonStyle(.plain)
-        .handCursor()
-        .onHover { hover = $0 }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Palette.elevated.opacity(0.55))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(focused ? Color.accentColor.opacity(0.6) : Palette.border, lineWidth: 1)
+        )
+        .onAppear { focused = true }
     }
 }
 
