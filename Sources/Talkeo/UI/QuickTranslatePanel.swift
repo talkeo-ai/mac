@@ -987,15 +987,14 @@ struct QuickTranslateView: View {
     /// History screen, reached via `fullHistoryLink` below.
     private static let recentHistoryCount = 5
 
+    /// This whole mode is the empty-selection entry point, not just a history
+    /// list — the compose input at the top is the primary thing (translate
+    /// something new), and the recent entries are secondary, below it. No
+    /// "History" page title: it would describe only the bottom half.
     private var historyView: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center) {
-                Text("History")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Palette.foreground)
-                Spacer()
-                // Clearing everything is a destructive, hard-to-undo action — it
-                // belongs in the main app, not one click away in a quick popover.
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                HistoryComposeInput(onSubmit: { model.translate($0) })
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .bold))
@@ -1008,27 +1007,18 @@ struct QuickTranslateView: View {
                 .handCursor()
             }
 
-            // Type straight into the list — no extra click to reach an editor.
-            HistoryComposeInput(onSubmit: { model.translate($0) })
-            Divider().overlay(Palette.border).opacity(0.5)
+            if !model.historyEntries.isEmpty {
+                Divider().overlay(Palette.border).opacity(0.5)
+                cardLabel("Recent")
 
-            if model.historyEntries.isEmpty {
-                Text("No translations yet.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Palette.tertiary)
-                    .padding(.vertical, 2)
-            } else {
                 let recent = Array(model.historyEntries.prefix(QuickTranslateView.recentHistoryCount))
                 VStack(spacing: 0) {
-                    ForEach(Array(recent.enumerated()), id: \.element.id) { index, entry in
+                    ForEach(recent) { entry in
                         HistoryRow(
                             entry: entry,
                             onOpen: { model.open(entry) },
                             onDelete: { model.deleteHistory(entry) }
                         )
-                        if index < recent.count - 1 {
-                            Divider().overlay(Palette.border).opacity(0.4)
-                        }
                     }
                 }
                 fullHistoryLink
@@ -1056,7 +1046,7 @@ struct QuickTranslateView: View {
             .buttonStyle(.plain)
             .handCursor()
         }
-        .padding(.top, 6)
+        .padding(.top, 4)
     }
 
     // MARK: Listen (TTS playback + select-to-hear, no explanations)
@@ -1975,47 +1965,38 @@ private struct HistoryRow: View {
     var body: some View {
         // A real Button (not onTapGesture) so the first click registers even
         // when the panel isn't key — tap gestures ignore acceptsFirstMouse.
+        // One quiet line, source → target — no language badge, no visible
+        // timestamp (it's a tooltip); the delete affordance is the only thing
+        // that appears on hover.
         Button(action: onOpen) {
-            HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(entry.source)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Palette.foreground)
-                        .lineLimit(1)
-                    Text(entry.target)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Palette.muted)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 8)
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("\(entry.detectedLang)→\(entry.translateLang)")
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundStyle(Palette.tertiary)
-                    Text(HistoryRow.relative(entry.timestamp))
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(Palette.tertiary)
-                }
-                .opacity(hover ? 0 : 1)
-            }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 4)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(hover ? Palette.elevated.opacity(0.35) : Color.clear)
-            )
-            .contentShape(Rectangle())
+            (Text(entry.source)
+                .foregroundColor(Palette.muted)
+             + Text("  →  ")
+                .foregroundColor(Palette.tertiary)
+             + Text(entry.target)
+                .foregroundColor(Palette.tertiary))
+                .font(.system(size: 13))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.vertical, 7)
+                .padding(.horizontal, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(hover ? Palette.elevated.opacity(0.3) : Color.clear)
+                )
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .handCursor()
+        .help(HistoryRow.relative(entry.timestamp))
         .overlay(alignment: .trailing) {
             if hover {
                 Button(action: onDelete) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(Palette.muted)
-                        .frame(width: 20, height: 20)
+                        .frame(width: 18, height: 18)
                         .background(Circle().fill(Palette.elevated))
                         .contentShape(Circle())
                 }
