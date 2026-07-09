@@ -62,12 +62,14 @@ final class FloatingBarPanel {
     /// Ticks while the cursor sits over the bar, reasserting the pointing-hand.
     /// Even with `BackgroundCursor` granted, the active app behind (e.g. a
     /// terminal) keeps receiving the mouse-moved events — key stays with it by
-    /// design — and re-sets its own cursor on each one. Those stomps are
-    /// countered move-for-move in `syncCursor`; this low-rate timer only covers
-    /// ones that arrive without a move (the active app's own timers, etc.), so
-    /// a loss self-corrects within ~2 frames without burning the main thread.
+    /// design — and re-sets its own cursor on each one. That's a cross-process
+    /// last-writer race with no ordering primitive: our per-move set wins only
+    /// some exchanges, so during movement the cursor would visibly strobe
+    /// between ours and theirs. Reasserting at display rate bounds any loss to
+    /// ~8ms — below perception. The timer only runs while the cursor is over
+    /// the bar, so the steady-state cost elsewhere is zero.
     private var cursorReassertTimer: Timer?
-    private static let cursorReassertInterval: TimeInterval = 1.0 / 30.0
+    private static let cursorReassertInterval: TimeInterval = 1.0 / 120.0
     /// Whether the last sync found the cursor over the visible pill, so leaving
     /// it restores the arrow exactly once (a background-set cursor that nobody
     /// else corrects would otherwise stick, e.g. over the desktop).
