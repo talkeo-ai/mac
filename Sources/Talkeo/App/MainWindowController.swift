@@ -21,6 +21,12 @@ final class MainWindowController: NSObject {
         self.window = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // AppKit hands initial key focus to the first toolbar control — the
+        // sidebar toggle — which draws a focus ring on it. Clear it back to
+        // the window; async because SwiftUI assigns focus after key.
+        DispatchQueue.main.async { [weak window] in
+            window?.makeFirstResponder(nil)
+        }
     }
 
     private func makeWindow() -> NSWindow {
