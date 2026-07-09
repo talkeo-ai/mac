@@ -56,15 +56,17 @@ final class FloatingBarPanel {
     private var slideTimer: Timer?
     private var cursorMonitors: [Any] = []
     /// Ticks while the cursor sits over the bar, repeatedly reasserting the
-    /// pointing-hand. A single override per mouse-moved event isn't enough: the
-    /// app behind (e.g. a terminal) likely reasserts its own cursor the same
-    /// cross-process way we do ours (there's no supported API to make a
-    /// non-activating panel win AppKit's normal cursor-rect arbitration), so
-    /// which one lands last for a given event is a genuine, unavoidable race.
-    /// Re-asserting on a tight timer for as long as we're hovered means any
-    /// single loss self-corrects within a frame instead of sticking.
+    /// pointing-hand. Even with `BackgroundCursor` granted, the active app
+    /// behind (e.g. a terminal) keeps receiving the mouse-moved events — key
+    /// stays with it by design — and re-sets its own cursor on each one, so a
+    /// single set can still be overwritten. Re-asserting on a tight timer means
+    /// any overwrite self-corrects within a frame instead of sticking.
     private var cursorReassertTimer: Timer?
     private static let cursorReassertInterval: TimeInterval = 1.0 / 120.0
+    /// Whether the last sync found the cursor over the visible pill, so leaving
+    /// it restores the arrow exactly once (a background-set cursor that nobody
+    /// else corrects would otherwise stick, e.g. over the desktop).
+    private var cursorIsOverBar = false
     /// The screen the bar is pinned to. Cached so it never flips to an adjacent
     /// display when auto-hide slides the panel partly off the edge.
     private var homeScreen: NSScreen?
@@ -113,24 +115,28 @@ final class FloatingBarPanel {
         onTranslateRef = { [weak self] in self?.onTranslate?() }
         onImproveRef = { [weak self] in self?.onImprove?() }
         onListenRef = { [weak self] in self?.onListen?() }
+        // Without this the window server is free to ignore cursor sets from a
+        // non-active app outright — the bar could never fix the cursor at all
+        // while e.g. a focused terminal asserts its I-beam.
+        _ = BackgroundCursor.isEnabled
         installCursorMonitor()
     }
 
     deinit { removeCursorMonitor() }
 
     /// SwiftUI's `onContinuousHover` doesn't reliably set the cursor on a
-    /// non-key, non-activating panel, so we watch mouse-moves ourselves and
-    /// force the pointing-hand whenever the cursor is over the visible bar.
-    /// This alone still races the app behind (e.g. a terminal keeping its own
-    /// I-beam live so it reads correctly while inactive) — see
-    /// `cursorReassertTimer` for how that race gets closed.
+    /// non-key, non-activating panel, so we watch mouse-moves ourselves
+    /// (global for moves delivered to other apps, local for our own) and keep
+    /// the cursor in sync with where it sits. `BackgroundCursor` makes those
+    /// sets stick; `cursorReassertTimer` wins the remaining contention with
+    /// the active app.
     private func installCursorMonitor() {
         removeCursorMonitor()
         let global = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
-            self?.updateCursorOverBar()
+            self?.syncCursor()
         }
         let local = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            self?.updateCursorOverBar()
+            self?.syncCursor()
             return event
         }
         cursorMonitors = [global, local].compactMap { $0 }
@@ -142,24 +148,36 @@ final class FloatingBarPanel {
         stopCursorReassertTimer()
     }
 
-    private func updateCursorOverBar() {
-        guard panel.isVisible, panel.frame.contains(NSEvent.mouseLocation) else {
+    /// The region where the hand cursor applies: the panel frame minus the
+    /// transparent shadow padding — just the visible glass. Clicks in the
+    /// padding fall through to the app behind, so the cursor should match.
+    private var cursorRect: NSRect {
+        panel.frame.insetBy(dx: Self.shadowPad, dy: Self.shadowPad)
+    }
+
+    /// Keep the cursor truthful around the bar: pointing-hand while over the
+    /// visible pill, restored to the arrow the moment it leaves (the active
+    /// app re-applies its own cursor on its next mouse-move if it wants
+    /// something else, e.g. an I-beam over text).
+    private func syncCursor() {
+        if panel.isVisible, cursorRect.contains(NSEvent.mouseLocation) {
+            cursorIsOverBar = true
+            NSCursor.pointingHand.set()
+            startCursorReassertTimer()
+        } else {
             stopCursorReassertTimer()
-            return
+            if cursorIsOverBar {
+                cursorIsOverBar = false
+                NSCursor.arrow.set()
+            }
         }
-        NSCursor.pointingHand.set()
-        startCursorReassertTimer()
     }
 
     private func startCursorReassertTimer() {
         guard cursorReassertTimer == nil else { return }
-        cursorReassertTimer = Timer.scheduledTimer(withTimeInterval: Self.cursorReassertInterval, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            guard self.panel.isVisible, self.panel.frame.contains(NSEvent.mouseLocation) else {
-                self.stopCursorReassertTimer()
-                return
-            }
-            NSCursor.pointingHand.set()
+        cursorReassertTimer = Timer.scheduledTimer(withTimeInterval: Self.cursorReassertInterval, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            self.syncCursor()
         }
     }
 
@@ -190,13 +208,14 @@ final class FloatingBarPanel {
         panel.orderFrontRegardless()
         refreshTracking()
         evaluate(animated: false)
+        syncCursor() // the bar may have appeared under a stationary cursor
     }
 
     func hide() {
         featureVisible = false
         stopTracking()
-        stopCursorReassertTimer()
         panel.orderOut(nil)
+        syncCursor() // hidden now — restores the arrow if the bar owned the cursor
     }
 
     /// Turn Dock-style auto-hide on/off. Off restores the always-visible bar.
@@ -258,6 +277,7 @@ final class FloatingBarPanel {
         } else {
             slideTimer?.invalidate(); slideTimer = nil
             panel.setFrameOrigin(NSPoint(x: targetX, y: shownOrigin().y))
+            syncCursor() // the bar may have jumped under (or away from) a stationary cursor
         }
     }
 
@@ -282,7 +302,12 @@ final class FloatingBarPanel {
             let p = min(1, (CACurrentMediaTime() - start) / Self.slideDuration)
             let eased = 1 - pow(1 - p, 3) // easeOutCubic
             self.panel.setFrameOrigin(NSPoint(x: startX + dx * eased, y: y))
-            if p >= 1 { timer.invalidate(); self.slideTimer = nil }
+            if p >= 1 {
+                timer.invalidate(); self.slideTimer = nil
+                // A reveal can slide the bar in under a stationary cursor (no
+                // mouse-move fires); retracts self-correct via the reassert timer.
+                self.syncCursor()
+            }
         }
     }
 
