@@ -9,14 +9,19 @@ import SwiftUI
 /// Dock icon stays, Discord-style — clicking it brings the window back.
 final class MainWindowController: NSObject {
     private var window: NSWindow?
+    /// Selection state shared with the SwiftUI tree, so callers can deep-link
+    /// into a section (e.g. the popover's "Full history" → Translate).
+    private let model = MainWindowModel()
 
     override init() {
         super.init()
         installMainMenuIfNeeded()
     }
 
-    /// Order the main window front and focus the app.
-    func show() {
+    /// Order the main window front and focus the app. Pass a section to land
+    /// on it; nil keeps whatever the user last had open.
+    func show(section: MainSection? = nil) {
+        if let section { model.selection = section }
         let window = self.window ?? makeWindow()
         self.window = window
         window.makeKeyAndOrderFront(nil)
@@ -43,7 +48,7 @@ final class MainWindowController: NSObject {
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 900, height: 560)
         window.backgroundColor = Palette.nsDynamic(0xF7F7F8, 0x161616)
-        window.contentViewController = NSHostingController(rootView: MainWindowView())
+        window.contentViewController = NSHostingController(rootView: MainWindowView(model: model))
         // Open filling the screen (minus menu bar / Dock), like a full-size SPA.
         if let screen = NSScreen.main ?? NSScreen.screens.first {
             window.setFrame(screen.visibleFrame, display: true)
@@ -153,8 +158,14 @@ enum MainSection: String, CaseIterable, Identifiable {
 
 // MARK: - Root view (SPA: icon rail + floating content card)
 
+/// Shared navigation state: the controller writes it for deep-links, the rail
+/// writes it on clicks, the detail pane reads it.
+final class MainWindowModel: ObservableObject {
+    @Published var selection: MainSection = .translate
+}
+
 struct MainWindowView: View {
-    @State private var selection: MainSection = .translate
+    @ObservedObject var model: MainWindowModel
 
     /// Window backdrop — the rail sits directly on it and the content card
     /// floats over it (Palette.surface is one step lighter, so the card
@@ -184,24 +195,24 @@ struct MainWindowView: View {
     private var rail: some View {
         VStack(spacing: 6) {
             ForEach(MainSection.ai) { item in
-                RailItem(item: item, isSelected: selection == item) { selection = item }
+                RailItem(item: item, isSelected: model.selection == item) { model.selection = item }
             }
 
             railDivider
 
             ForEach(MainSection.tools) { item in
-                RailItem(item: item, isSelected: selection == item) { selection = item }
+                RailItem(item: item, isSelected: model.selection == item) { model.selection = item }
             }
 
             railDivider
 
             ForEach(MainSection.progress) { item in
-                RailItem(item: item, isSelected: selection == item) { selection = item }
+                RailItem(item: item, isSelected: model.selection == item) { model.selection = item }
             }
 
             Spacer(minLength: 0)
 
-            RailItem(item: .settings, isSelected: selection == .settings) { selection = .settings }
+            RailItem(item: .settings, isSelected: model.selection == .settings) { model.selection = .settings }
                 .padding(.bottom, 14)
         }
         .padding(.top, 52)
@@ -219,7 +230,7 @@ struct MainWindowView: View {
 
     @ViewBuilder
     private var detail: some View {
-        switch selection {
+        switch model.selection {
         case .chat:
             ToolPage(
                 section: .chat,
@@ -548,6 +559,6 @@ private struct PageHeader: View {
 // MARK: - Xcode Preview
 
 #Preview("Main window") {
-    MainWindowView()
+    MainWindowView(model: MainWindowModel())
         .frame(width: 1100, height: 700)
 }
