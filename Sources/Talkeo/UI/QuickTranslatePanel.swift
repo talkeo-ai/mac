@@ -994,15 +994,8 @@ struct QuickTranslateView: View {
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Palette.foreground)
                 Spacer()
-                if !model.historyEntries.isEmpty {
-                    Button(action: { model.clearHistory() }) {
-                        Text("Clear")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Palette.muted)
-                    }
-                    .buttonStyle(.plain)
-                    .handCursor()
-                }
+                // Clearing everything is a destructive, hard-to-undo action — it
+                // belongs in the main app, not one click away in a quick popover.
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .bold))
@@ -1017,6 +1010,7 @@ struct QuickTranslateView: View {
 
             // Type straight into the list — no extra click to reach an editor.
             HistoryComposeInput(onSubmit: { model.translate($0) })
+            Divider().overlay(Palette.border).opacity(0.5)
 
             if model.historyEntries.isEmpty {
                 Text("No translations yet.")
@@ -1024,7 +1018,6 @@ struct QuickTranslateView: View {
                     .foregroundStyle(Palette.tertiary)
                     .padding(.vertical, 2)
             } else {
-                Divider().overlay(Palette.border).opacity(0.5)
                 let recent = Array(model.historyEntries.prefix(QuickTranslateView.recentHistoryCount))
                 VStack(spacing: 0) {
                     ForEach(Array(recent.enumerated()), id: \.element.id) { index, entry in
@@ -1047,19 +1040,22 @@ struct QuickTranslateView: View {
     /// the last few. The dedicated History screen isn't built yet (it's a later
     /// ROADMAP.md item), so this is a stub for that wiring.
     private var fullHistoryLink: some View {
-        Button(action: {
-            // TODO: open the main app's History screen once it ships.
-        }) {
-            HStack(spacing: 4) {
-                Text("Full history")
-                    .font(.system(size: 12.5, weight: .medium))
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 10.5, weight: .semibold))
+        HStack {
+            Spacer()
+            Button(action: {
+                // TODO: open the main app's History screen once it ships.
+            }) {
+                HStack(spacing: 4) {
+                    Text("Full history")
+                        .font(.system(size: 12, weight: .medium))
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundStyle(Palette.muted)
             }
-            .foregroundStyle(Color.accentColor)
+            .buttonStyle(.plain)
+            .handCursor()
         }
-        .buttonStyle(.plain)
-        .handCursor()
         .padding(.top, 6)
     }
 
@@ -1980,36 +1976,40 @@ private struct HistoryRow: View {
         // A real Button (not onTapGesture) so the first click registers even
         // when the panel isn't key — tap gestures ignore acceptsFirstMouse.
         Button(action: onOpen) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(entry.source)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(Palette.foreground)
-                    .lineLimit(1)
-                HStack(spacing: 5) {
-                    Text("\(entry.detectedLang) → \(entry.translateLang)")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Palette.tertiary)
-                    Text("·")
-                        .font(.system(size: 11, weight: .semibold))
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.source)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Palette.foreground)
+                        .lineLimit(1)
+                    Text(entry.target)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Palette.muted)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(entry.detectedLang)→\(entry.translateLang)")
+                        .font(.system(size: 9.5, weight: .medium))
                         .foregroundStyle(Palette.tertiary)
                     Text(HistoryRow.relative(entry.timestamp))
-                        .font(.system(size: 11))
+                        .font(.system(size: 9.5))
                         .foregroundStyle(Palette.tertiary)
-                        .opacity(hover ? 0 : 1)
                 }
+                .opacity(hover ? 0 : 1)
             }
-            .padding(.vertical, 11)
+            .padding(.vertical, 8)
             .padding(.horizontal, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(hover ? Palette.elevated.opacity(0.4) : Color.clear)
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(hover ? Palette.elevated.opacity(0.35) : Color.clear)
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .handCursor()
-        .overlay(alignment: .topTrailing) {
+        .overlay(alignment: .trailing) {
             if hover {
                 Button(action: onDelete) {
                     Image(systemName: "xmark")
@@ -2022,7 +2022,6 @@ private struct HistoryRow: View {
                 .buttonStyle(.plain)
                 .help("Remove")
                 .handCursor()
-                .padding(.top, 8)
                 .padding(.trailing, 2)
             }
         }
@@ -2037,22 +2036,27 @@ private struct HistoryRow: View {
 }
 
 /// Always-on compose bar atop the history list — typing and hitting Return
-/// translates immediately, no extra click into a separate editor first.
-/// Auto-focuses on appear (history is the empty-selection entry point, so the
-/// moment it opens is exactly when someone wants to start typing).
+/// translates immediately, no extra click into a separate editor first. Sized
+/// and styled to match the translate pane's own editable input (no box, no
+/// border) rather than looking like a separate search field. Auto-focuses on
+/// appear (history is the empty-selection entry point, so the moment it opens
+/// is exactly when someone wants to start typing).
 private struct HistoryComposeInput: View {
     let onSubmit: (String) -> Void
     @State private var text: String = ""
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "character.bubble")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Palette.tertiary)
-            TextField("Translate something…", text: $text)
+        ZStack(alignment: .leading) {
+            if text.isEmpty {
+                Text("Type or paste text to translate, then press Return.")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Palette.tertiary)
+                    .allowsHitTesting(false)
+            }
+            TextField("", text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 15))
+                .font(.system(size: 16))
                 .foregroundStyle(Palette.foreground)
                 .focused($focused)
                 .onSubmit {
@@ -2061,16 +2065,6 @@ private struct HistoryComposeInput: View {
                     onSubmit(trimmed)
                 }
         }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Palette.elevated.opacity(0.55))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(focused ? Color.accentColor.opacity(0.6) : Palette.border, lineWidth: 1)
-        )
         .onAppear { focused = true }
     }
 }
