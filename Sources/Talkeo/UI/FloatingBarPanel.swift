@@ -74,10 +74,15 @@ final class FloatingBarPanel {
     /// it restores the arrow exactly once (a background-set cursor that nobody
     /// else corrects would otherwise stick, e.g. over the desktop).
     private var cursorIsOverBar = false
-    /// Frames of the action buttons in the content's SwiftUI space (top-left
-    /// origin), reported by the view — the hand cursor applies only there;
-    /// the rest of the glass shows the plain arrow.
-    private var buttonRects: [CGRect] = []
+    /// The action buttons (label + frame in the content's SwiftUI space,
+    /// top-left origin), reported by the view — the hand cursor and hover tip
+    /// apply only there; the rest of the glass shows the plain arrow.
+    private var buttons: [BarButtonInfo] = []
+    /// Label of the button currently under the cursor (nil = none), so the
+    /// hover tip reacts to changes only, not to every reassert tick.
+    private var hoveredButton: String?
+    /// shadcn-style tip beside the bar naming the hovered button.
+    private let tooltip = BarTooltipPanel()
     /// Whether the panel already carries the per-window cursor tag (see
     /// `BackgroundCursor.tagWindow`). Tagging needs a live window number, so
     /// it's applied on show and retried until it takes.
@@ -95,7 +100,7 @@ final class FloatingBarPanel {
         var onTranslateRef: (() -> Void)?
         var onImproveRef: (() -> Void)?
         var onListenRef: (() -> Void)?
-        var onButtonFramesRef: (([CGRect]) -> Void)?
+        var onButtonFramesRef: (([BarButtonInfo]) -> Void)?
         let view = FloatingBarView(
             model: model,
             onTranslate: { onTranslateRef?() },
@@ -129,10 +134,12 @@ final class FloatingBarPanel {
 
         self.panel = panel
 
-        onTranslateRef = { [weak self] in self?.onTranslate?() }
-        onImproveRef = { [weak self] in self?.onImprove?() }
-        onListenRef = { [weak self] in self?.onListen?() }
-        onButtonFramesRef = { [weak self] rects in self?.buttonRects = rects }
+        // Acting on a button dismisses its tip right away (the popover the
+        // action opens would otherwise appear under it).
+        onTranslateRef = { [weak self] in self?.tooltip.hide(); self?.onTranslate?() }
+        onImproveRef = { [weak self] in self?.tooltip.hide(); self?.onImprove?() }
+        onListenRef = { [weak self] in self?.tooltip.hide(); self?.onListen?() }
+        onButtonFramesRef = { [weak self] buttons in self?.buttons = buttons }
         // Without this the window server is free to ignore cursor sets from a
         // non-active app outright — the bar could never fix the cursor at all
         // while e.g. a focused terminal asserts its I-beam.
@@ -191,12 +198,41 @@ final class FloatingBarPanel {
                 cursorIsOverBar = false
                 NSCursor.arrow.set()
             }
+            if hoveredButton != nil {
+                hoveredButton = nil
+                tooltip.hide()
+            }
             return
         }
         cursorIsOverBar = true
-        let overButton = buttonRects.contains { $0.contains(barPoint(point)) }
-        (overButton ? NSCursor.pointingHand : NSCursor.arrow).set()
+        let local = barPoint(point)
+        let hovered = buttons.first { $0.frame.contains(local) }
+        (hovered != nil ? NSCursor.pointingHand : NSCursor.arrow).set()
+        updateTooltip(hovered)
         startCursorReassertTimer()
+    }
+
+    /// Show/swap/hide the hover tip when the hovered button changes. Stays
+    /// quiet while an option popover is open — the tip would sit on top of it.
+    private func updateTooltip(_ hovered: BarButtonInfo?) {
+        guard hovered?.label != hoveredButton else { return }
+        hoveredButton = hovered?.label
+        guard let hovered, !holdRevealed else {
+            tooltip.hide()
+            return
+        }
+        tooltip.request(text: hovered.label, pointingAt: screenRect(of: hovered.frame))
+    }
+
+    /// A view-reported (SwiftUI top-left) frame in screen coordinates.
+    private func screenRect(of rect: CGRect) -> NSRect {
+        let frame = panel.frame
+        return NSRect(
+            x: frame.origin.x + rect.minX,
+            y: frame.origin.y + frame.height - rect.maxY,
+            width: rect.width,
+            height: rect.height
+        )
     }
 
     /// Convert a screen point into the bar content's SwiftUI space (top-left
@@ -251,6 +287,7 @@ final class FloatingBarPanel {
     func hide() {
         featureVisible = false
         stopTracking()
+        tooltip.hide()
         panel.orderOut(nil)
         syncCursor() // hidden now — restores the arrow if the bar owned the cursor
     }
@@ -269,6 +306,7 @@ final class FloatingBarPanel {
     func setHoldRevealed(_ value: Bool) {
         guard holdRevealed != value else { return }
         holdRevealed = value
+        if value { tooltip.hide() } // the popover opens where the tip sits
         guard featureVisible else { return }
         evaluate(animated: true)
     }
@@ -400,11 +438,17 @@ final class FloatingBarModel: ObservableObject {
     @Published var hasSelection = false
 }
 
-/// Collects the bar buttons' frames (in `FloatingBarView.spaceName` space) so
-/// the panel can scope the hand cursor to the actual controls.
+/// A bar button's label and frame (in `FloatingBarView.spaceName` space),
+/// reported to the panel so it can scope the hand cursor to the actual
+/// controls and anchor each one's hover tip.
+struct BarButtonInfo: Equatable {
+    let label: String
+    let frame: CGRect
+}
+
 private struct BarButtonFramesKey: PreferenceKey {
-    static var defaultValue: [CGRect] = []
-    static func reduce(value: inout [CGRect], nextValue: () -> [CGRect]) {
+    static var defaultValue: [BarButtonInfo] = []
+    static func reduce(value: inout [BarButtonInfo], nextValue: () -> [BarButtonInfo]) {
         value.append(contentsOf: nextValue())
     }
 }
@@ -414,10 +458,10 @@ struct FloatingBarView: View {
     var onTranslate: () -> Void = {}
     var onImprove: () -> Void = {}
     var onListen: () -> Void = {}
-    /// Reports the buttons' frames in `spaceName` space (== the window
-    /// content, since the panel hugs this view exactly) so the AppKit side
-    /// can scope the hand cursor to them.
-    var onButtonFrames: ([CGRect]) -> Void = { _ in }
+    /// Reports the buttons' labels + frames in `spaceName` space (== the
+    /// window content, since the panel hugs this view exactly) so the AppKit
+    /// side can scope the hand cursor to them and anchor their hover tips.
+    var onButtonFrames: ([BarButtonInfo]) -> Void = { _ in }
 
     /// Coordinate space covering the whole bar content including the shadow
     /// padding — window coordinates by construction.
@@ -514,14 +558,15 @@ private struct BarButton: View {
                 .background(Circle().fill(fillColor))
         }
         .buttonStyle(.plain)
-        .help(help)
-        // Highlight only — the hand cursor is owned by FloatingBarPanel.syncCursor.
+        // Highlight only — the hand cursor is owned by FloatingBarPanel.syncCursor,
+        // and the custom hover tip replaces the native .help tag.
         .onHover { isHover = $0 }
-        // Report where this button sits so the hand cursor applies exactly here.
+        // Report where this button sits (and its label) so the hand cursor and
+        // the hover tip apply exactly here.
         .background(GeometryReader { geo in
             Color.clear.preference(
                 key: BarButtonFramesKey.self,
-                value: [geo.frame(in: .named(FloatingBarView.spaceName))]
+                value: [BarButtonInfo(label: help, frame: geo.frame(in: .named(FloatingBarView.spaceName)))]
             )
         })
         .animation(.easeOut(duration: 0.18), value: isActive)
