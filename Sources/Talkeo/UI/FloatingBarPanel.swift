@@ -78,6 +78,10 @@ final class FloatingBarPanel {
     /// origin), reported by the view — the hand cursor applies only there;
     /// the rest of the glass shows the plain arrow.
     private var buttonRects: [CGRect] = []
+    /// Whether the panel already carries the per-window cursor tag (see
+    /// `BackgroundCursor.tagWindow`). Tagging needs a live window number, so
+    /// it's applied on show and retried until it takes.
+    private var windowTagged = false
     /// The screen the bar is pinned to. Cached so it never flips to an adjacent
     /// display when auto-hide slides the panel partly off the edge.
     private var homeScreen: NSScreen?
