@@ -25,6 +25,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         floatingBar.onTranslate = { [weak self] in self?.translateCurrentSelection() }
         floatingBar.onImprove = { [weak self] in self?.improveCurrentSelection() }
         floatingBar.onListen = { [weak self] in self?.listenCurrentSelection() }
+        // An auto-hiding bar must never retract from under its open popover.
+        quickTranslate.onVisibilityChange = { [weak self] visible in
+            self?.floatingBar.setHoldRevealed(visible)
+        }
         floatingBar.show()
 
         statusBar = StatusBarController(
