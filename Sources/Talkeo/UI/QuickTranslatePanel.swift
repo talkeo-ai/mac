@@ -747,14 +747,18 @@ final class QuickTranslateModel: ObservableObject {
         let tgt = termLang == "EN" ? "ES" : "EN"
         let sentence = pane == .source ? sourceText : targetText
         let item = LearnTerm(text: clean, sentence: sentence, sourceLang: src, targetLang: tgt, pane: pane, range: range)
-        // Re-selecting the exact same span just focuses it.
-        if let i = terms.firstIndex(where: { $0.pane == pane && NSEqualRanges($0.range, range) }) {
-            activeTermIndex = i
-        } else {
-            // No stacking: a new span replaces any markers it overlaps in this pane.
-            terms.removeAll { $0.pane == pane && NSIntersectionRange($0.range, range).length > 0 }
-            terms.append(item)
-            activeTermIndex = terms.count - 1
+        // Animated: opening the card tightens both panes and slides the card
+        // section in below them.
+        withAnimation(.easeInOut(duration: 0.22)) {
+            // Re-selecting the exact same span just focuses it.
+            if let i = terms.firstIndex(where: { $0.pane == pane && NSEqualRanges($0.range, range) }) {
+                activeTermIndex = i
+            } else {
+                // No stacking: a new span replaces any markers it overlaps in this pane.
+                terms.removeAll { $0.pane == pane && NSIntersectionRange($0.range, range).length > 0 }
+                terms.append(item)
+                activeTermIndex = terms.count - 1
+            }
         }
         loadCardIfNeeded(item)
     }
@@ -773,11 +777,14 @@ final class QuickTranslateModel: ObservableObject {
         guard let i = activeTermIndex, terms.indices.contains(i) else { return }
         let key = terms[i].text
         explainTasks[key]?.cancel(); explainTasks[key] = nil
-        cards[key] = nil
-        loadingTerms.remove(key)
-        cardErrors[key] = nil
-        terms.remove(at: i)
-        activeTermIndex = terms.isEmpty ? nil : min(i, terms.count - 1)
+        // Animated: closing the last card gives the panes their space back.
+        withAnimation(.easeInOut(duration: 0.22)) {
+            cards[key] = nil
+            loadingTerms.remove(key)
+            cardErrors[key] = nil
+            terms.remove(at: i)
+            activeTermIndex = terms.isEmpty ? nil : min(i, terms.count - 1)
+        }
     }
 
     func retryActiveCard() {
@@ -840,6 +847,8 @@ struct QuickTranslateView: View {
     /// Measured natural height of the improve correction card, so it scrolls
     /// internally past a cap instead of growing the popover off-screen.
     @State private var cardHeight: CGFloat = 120
+    /// Same for the explain card (select-to-explain) — see `explainSection`.
+    @State private var explainHeight: CGFloat = 200
 
     /// Red tint marking the changed fragments in the original (Improve). Clearly
     /// visible for the currently-paged correction; `drawMarkers` dims the rest.
@@ -859,6 +868,19 @@ struct QuickTranslateView: View {
     /// with source + translation both capped, the whole popover stays well
     /// under half the screen even for long pasted text.
     static let textBoxMaxHeight: CGFloat = 160
+    /// Tighter cap while an explain card is open below the two panes, so the
+    /// card always fits without pushing the popover past the window's max
+    /// height (both panes stay visible — the card must never cost you the
+    /// translation). Budget: 2×(header 26 + box ≤88 + chrome 20) + explain
+    /// card ≤ explainMaxHeight + paddings ≈ 600 = the panel cap.
+    static let textBoxMaxHeightWithCard: CGFloat = 88
+    /// Cap for the explain card; taller cards scroll internally.
+    static let explainMaxHeight: CGFloat = 250
+
+    /// Live cap for both text panes — tightens while a term's card is open.
+    private var textBoxCap: CGFloat {
+        model.activeTerm == nil ? QuickTranslateView.textBoxMaxHeight : QuickTranslateView.textBoxMaxHeightWithCard
+    }
     /// How many recent entries show inline under the source card in History.
     /// Older ones live in the main app's History screen, reached via
     /// `fullHistoryLink`.
@@ -870,16 +892,12 @@ struct QuickTranslateView: View {
                 improveView
             } else if model.mode == .listen {
                 listenView
-            } else if let term = model.activeTerm {
-                // One box: the pane the term was picked from (with its highlight),
-                // then the card. The other box is hidden.
-                paneView(term.pane, withClose: true, height: term.pane == .source ? $sourceHeight : $targetHeight)
-                Divider().overlay(Palette.border).opacity(0.6)
-                cardSection
             } else {
                 // History ⇄ translate result: one persistent source card (see
                 // `sourceCard`) — only its editability/content and whatever's
                 // below it change with mode, so it's never replaced mid-transition.
+                // Picking a word keeps both panes visible (they tighten a bit)
+                // and adds the explain card underneath.
                 sourceCardSection
             }
         }
@@ -979,7 +997,7 @@ struct QuickTranslateView: View {
                     text: isSource ? model.sourceText : model.targetText,
                     height: height,
                     width: QuickTranslateView.cardTextWidth,
-                    maxHeight: QuickTranslateView.textBoxMaxHeight,
+                    maxHeight: textBoxCap,
                     minHeight: QuickTranslateView.textBoxMinHeight,
                     highlights: model.highlights(for: pane),
                     isEditable: editing,
@@ -1118,7 +1136,45 @@ struct QuickTranslateView: View {
         } else if !model.sourceEditing {
             Divider().overlay(Palette.border).opacity(0.6)
             paneView(.target, withClose: false, height: $targetHeight)
+
+            if model.activeTerm != nil {
+                Divider().overlay(Palette.border).opacity(0.6)
+                explainSection
+            } else if model.phase == .done {
+                // Make the select-to-explain feature discoverable — nothing
+                // else hints that the text is interactive.
+                selectHint
+            }
         }
+    }
+
+    /// One quiet line under the result teaching the core learning gesture.
+    private var selectHint: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "character.cursor.ibeam")
+                .font(.system(size: 10, weight: .medium))
+            Text("Select any word or phrase to see its meaning")
+                .font(.system(size: 11))
+        }
+        .foregroundStyle(Palette.tertiary)
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    /// The explain card, height-capped: sized to content while it fits,
+    /// scrolling internally past `explainMaxHeight` so it never pushes the
+    /// popover (which keeps both panes visible above it) off the screen.
+    /// Same measured-height pattern as the improve correction card.
+    private var explainSection: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            cardSection
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(key: ExplainCardHeightKey.self, value: geo.size.height)
+                    }
+                )
+        }
+        .frame(height: min(max(explainHeight, 1), QuickTranslateView.explainMaxHeight))
+        .onPreferenceChange(ExplainCardHeightKey.self) { explainHeight = $0 }
     }
 
     /// The one persistent text box for whatever's being translated: empty and
@@ -1135,7 +1191,7 @@ struct QuickTranslateView: View {
                 text: model.sourceText,
                 height: $sourceHeight,
                 width: QuickTranslateView.cardTextWidth,
-                maxHeight: QuickTranslateView.textBoxMaxHeight,
+                maxHeight: textBoxCap,
                 minHeight: QuickTranslateView.textBoxMinHeight,
                 highlights: model.highlights(for: .source),
                 isEditable: editing,
@@ -1628,11 +1684,20 @@ struct QuickTranslateView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Shaped like the card it's standing in for — a meanings line plus two
+    /// example pairs (the typical payload) — so the swap to real content is a
+    /// small settle, not a big grow. The headword above it is already real.
     private var cardShimmer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            shimmerBar(width: 120, height: 15)
-            shimmerBar(width: 200, height: 12)
-            shimmerBar(width: 240, height: 12)
+        VStack(alignment: .leading, spacing: 16) {
+            shimmerBar(width: 230, height: 14)
+            VStack(alignment: .leading, spacing: 5) {
+                shimmerBar(width: 280, height: 12)
+                shimmerBar(width: 220, height: 11)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                shimmerBar(width: 260, height: 12)
+                shimmerBar(width: 200, height: 11)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -2439,6 +2504,16 @@ private struct QuickSizeKey: PreferenceKey {
 /// Natural (uncapped) height of the improve correction card, reported up so the
 /// surrounding scroll view can size to content up to its cap.
 private struct ImproveCardHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > value { value = next }
+    }
+}
+
+/// Natural (uncapped) height of the explain card, reported up so its scroll
+/// view sizes to content up to `QuickTranslateView.explainMaxHeight`.
+private struct ExplainCardHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         let next = nextValue()
