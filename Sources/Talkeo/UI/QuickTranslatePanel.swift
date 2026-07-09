@@ -203,10 +203,11 @@ final class QuickTranslatePanel {
         // window shape. Animating the actual window frame (tried this, reverted
         // it) resizes the backing layer natively and the corner clip and the
         // vibrancy material redraw visibly lag behind it for a frame or two —
-        // square corners flash mid-resize. The smooth part (the card morphing)
-        // already comes from SwiftUI's `matchedGeometryEffect`/`withAnimation`
-        // on the content; the window just needs to match the content's already-
-        // final size, not animate to it itself.
+        // square corners flash mid-resize. The smooth part already comes from
+        // SwiftUI's own `withAnimation` on the content (the source card is one
+        // persistent view — see `QuickTranslateView.sourceCard` — so there's no
+        // view-to-view morph to keep in sync here, just this window matching
+        // the content's already-final size).
         panel.setFrame(NSRect(origin: origin, size: NSSize(width: Self.width, height: height)), display: true, animate: false)
     }
 
@@ -374,9 +375,9 @@ final class QuickTranslateModel: ObservableObject {
     func translate(_ text: String) {
         task?.cancel()
         clearSelection()
-        // Animated: the compose input (History) and the source card share a
-        // `matchedGeometryEffect` id, so this transition morphs one into the
-        // other instead of hard-swapping the view tree.
+        // Animated: `sourceCard` is one persistent view bound to `sourceText`
+        // (see `QuickTranslateView`) that just becomes read-only here, so this
+        // transition updates it in place instead of swapping the view tree.
         withAnimation(.easeInOut(duration: 0.22)) {
             mode = .translate
             sourceEditing = false
@@ -616,10 +617,17 @@ final class QuickTranslateModel: ObservableObject {
     }
 
     /// Switch the popover into the history list (Translate tapped with no text).
+    /// The source card now binds straight to `sourceText`, so it has to be
+    /// cleared here — otherwise a prior translation would linger in what's
+    /// supposed to be the empty compose box.
     func showHistory() {
         task?.cancel()
         clearSelection()
         sourceEditing = false
+        sourceText = ""
+        targetText = ""
+        revealed = false
+        phase = .idle
         historyEntries = history.all()
         mode = .history
     }
@@ -799,10 +807,6 @@ struct QuickTranslateView: View {
     /// Measured natural height of the improve correction card, so it scrolls
     /// internally past a cap instead of growing the popover off-screen.
     @State private var cardHeight: CGFloat = 120
-    /// Links the compose input (History) to the source card (translate
-    /// result) so the same box visually morphs between the two instead of
-    /// one replacing the other — see `cardChrome()`/`historyView`/`paneView`.
-    @Namespace private var cardNamespace
 
     /// Red tint marking the changed fragments in the original (Improve). Clearly
     /// visible for the currently-paged correction; `drawMarkers` dims the rest.
@@ -813,19 +817,20 @@ struct QuickTranslateView: View {
     /// minus the card's own horizontal padding (12 × 2).
     static let cardTextWidth: CGFloat = width - 32 - 24
     /// Shared floor/ceiling for every text box that uses `cardChrome()` — the
-    /// compose input and the translate result's source/target cards. Same
-    /// bounds everywhere so a box's size doesn't jump just because a
-    /// particular state (loading vs. content, compose vs. translated) happened
-    /// to use a different cap — the source card in particular shares an id
-    /// with the compose input, so a mismatch there would visibly resize it.
+    /// source card and the translate result's target card. Same bounds
+    /// everywhere so a box's size doesn't jump just because a particular
+    /// state (loading vs. content, compose vs. translated) happened to use a
+    /// different cap.
     static let textBoxMinHeight: CGFloat = 52
     static let textBoxMaxHeight: CGFloat = 240
+    /// How many recent entries show inline under the source card in History.
+    /// Older ones live in the main app's History screen, reached via
+    /// `fullHistoryLink`.
+    private static let recentHistoryCount = 5
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if model.mode == .history {
-                historyView
-            } else if model.mode == .improve {
+            if model.mode == .improve {
                 improveView
             } else if model.mode == .listen {
                 listenView
@@ -836,13 +841,10 @@ struct QuickTranslateView: View {
                 Divider().overlay(Palette.border).opacity(0.6)
                 cardSection
             } else {
-                // No selection yet: detected text on top, its translation below.
-                // While editing the source, only the input shows.
-                paneView(.source, withClose: true, height: $sourceHeight)
-                if !model.sourceEditing {
-                    Divider().overlay(Palette.border).opacity(0.6)
-                    paneView(.target, withClose: false, height: $targetHeight)
-                }
+                // History ⇄ translate result: one persistent source card (see
+                // `sourceCard`) — only its editability/content and whatever's
+                // below it change with mode, so it's never replaced mid-transition.
+                sourceCardSection
             }
         }
         .padding(16)
@@ -915,10 +917,6 @@ struct QuickTranslateView: View {
             }
             paneText(pane, height: height)
                 .cardChrome()
-                // The source card shares an identity with the compose input
-                // (`historyView`) — SwiftUI morphs the one box between the two
-                // instead of swapping it out when a translation starts.
-                .matchedGeometryEffect(id: isSource ? "sourceCard" : "targetCard-\(pane)", in: cardNamespace)
         }
     }
 
@@ -995,37 +993,58 @@ struct QuickTranslateView: View {
             .foregroundStyle(Palette.tertiary)
     }
 
-    // MARK: History (shown when Translate is tapped with nothing selected)
+    // MARK: History ⇄ translate result (shown with nothing selected)
 
-    /// How many recent entries show inline. Older ones live in the main app's
-    /// History screen, reached via `fullHistoryLink` below.
-    private static let recentHistoryCount = 5
-
-    /// This whole mode is the empty-selection entry point, not just a history
-    /// list — titled "Translate" (what the compose input actually does), with
-    /// the recent entries as a secondary "Recent" section below it.
-    private var historyView: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center) {
+    /// The header above the source card, plus what's below it. Only the
+    /// header content and the below-the-card section change with mode — the
+    /// card itself (`sourceCard`) is a single view used unconditionally, so
+    /// switching between History and a translate result reads as that one box
+    /// updating in place (Linear's persistent-viewport pattern: swap the
+    /// content, not the container).
+    @ViewBuilder
+    private var sourceCardSection: some View {
+        HStack(alignment: .center) {
+            if model.mode == .history {
                 Text("Translate")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Palette.foreground)
-                Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Palette.muted)
-                        .frame(width: 26, height: 26)
-                        .background(Circle().fill(Palette.elevated))
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .handCursor()
+            } else {
+                cardLabel(QuickTranslateModel.languageName(model.detectedLang))
             }
+            Spacer()
+            if model.mode == .translate {
+                QuickIconButton(system: model.sourceEditing ? "checkmark" : "pencil") {
+                    if model.sourceEditing { model.commitEdit() } else { model.beginEdit() }
+                }
+                if !model.sourceText.isEmpty, !model.sourceEditing {
+                    // Listen only for English — never read the Spanish side aloud.
+                    if model.detectedLang == "EN" {
+                        QuickIconButton(system: "speaker.wave.2") {
+                            Speaker.speak(model.sourceText, lang: "EN")
+                        }
+                    }
+                    QuickIconButton(system: "doc.on.doc") {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(model.sourceText, forType: .string)
+                    }
+                }
+            }
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Palette.muted)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Palette.elevated))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .handCursor()
+        }
 
-            HistoryComposeInput(onSubmit: { model.translate($0) })
-                .matchedGeometryEffect(id: "sourceCard", in: cardNamespace)
+        sourceCard
 
+        if model.mode == .history {
             if !model.historyEntries.isEmpty {
                 Divider().overlay(Palette.border).opacity(0.5)
                 cardLabel("Recent")
@@ -1042,7 +1061,54 @@ struct QuickTranslateView: View {
                 }
                 fullHistoryLink
             }
+        } else if !model.sourceEditing {
+            Divider().overlay(Palette.border).opacity(0.6)
+            paneView(.target, withClose: false, height: $targetHeight)
         }
+    }
+
+    /// The one persistent text box for whatever's being translated: empty and
+    /// editable before there's anything (History's compose input), then
+    /// showing the detected text once translated (tap the pencil to edit
+    /// again). Always bound straight to `model.sourceText` — this is the same
+    /// view in both states, not two different views standing in for each
+    /// other.
+    @ViewBuilder
+    private var sourceCard: some View {
+        let editing = model.mode == .history || model.sourceEditing
+        ZStack(alignment: .topLeading) {
+            SelectableText(
+                text: model.sourceText,
+                height: $sourceHeight,
+                width: QuickTranslateView.cardTextWidth,
+                maxHeight: QuickTranslateView.textBoxMaxHeight,
+                minHeight: QuickTranslateView.textBoxMinHeight,
+                highlights: model.highlights(for: .source),
+                isEditable: editing,
+                onTextChange: { model.sourceText = $0 },
+                onCommit: {
+                    if model.mode == .history {
+                        let trimmed = model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else { return }
+                        model.translate(trimmed)
+                    } else {
+                        model.commitEdit()
+                    }
+                }
+            ) { term, range in
+                model.explain(term: term, pane: .source, range: range)
+            }
+            .frame(height: sourceHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if editing, model.sourceText.isEmpty {
+                Text("Type or paste text to translate…")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Palette.tertiary)
+                    .allowsHitTesting(false)
+            }
+        }
+        .cardChrome()
     }
 
     /// Jumps to the full history in the main app — the popover only ever shows
@@ -2103,56 +2169,6 @@ private struct HistoryRow: View {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
         return formatter.localizedString(for: date, relativeTo: Date())
-    }
-}
-
-/// Always-on compose bar atop the history list — typing and hitting Return
-/// translates immediately, no extra click into a separate editor first. Same
-/// `cardChrome()` box and the same min/max height as the translate result's
-/// source card (they share a `matchedGeometryEffect` id), so switching
-/// between them doesn't jump size. Auto-focuses on appear (history is the
-/// empty-selection entry point, so the moment it opens is exactly when
-/// someone wants to start typing).
-private struct HistoryComposeInput: View {
-    let onSubmit: (String) -> Void
-    @State private var text: String = ""
-    @State private var textHeight: CGFloat = QuickTranslateView.textBoxMinHeight
-
-    /// `SelectableText` needs the exact laid-out width to size itself — same
-    /// card padding as `cardChrome()`.
-    private static let textWidth: CGFloat = QuickTranslateView.cardTextWidth
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            // Same underlying editor as the translate pane's edit-in-place box:
-            // wraps instead of scrolling sideways, grows with content, and past
-            // `maxHeight` scrolls internally. Auto-focuses itself (built into
-            // `SelectableText`), same as switching the translate pane into edit.
-            SelectableText(
-                text: text,
-                height: $textHeight,
-                width: Self.textWidth,
-                maxHeight: QuickTranslateView.textBoxMaxHeight,
-                minHeight: QuickTranslateView.textBoxMinHeight,
-                isEditable: true,
-                onTextChange: { text = $0 },
-                onCommit: {
-                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty else { return }
-                    onSubmit(trimmed)
-                    text = ""
-                }
-            ) { _, _ in }
-            .frame(height: textHeight)
-
-            if text.isEmpty {
-                Text("Type or paste text to translate…")
-                    .font(.system(size: 15))
-                    .foregroundStyle(Palette.tertiary)
-                    .allowsHitTesting(false)
-            }
-        }
-        .cardChrome()
     }
 }
 
