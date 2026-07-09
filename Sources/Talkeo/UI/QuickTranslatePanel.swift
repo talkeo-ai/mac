@@ -330,6 +330,17 @@ final class QuickTranslateModel: ObservableObject {
     /// the text and selecting does not mark terms; confirming re-translates.
     @Published var sourceEditing: Bool = false
 
+    /// While an explain card is open, the pane that stays expanded — the other
+    /// collapses to its header (tap it to switch, e.g. to select words there
+    /// too). Follows the pane the active term was picked from; nil = no card,
+    /// both panes shown normally.
+    @Published var focusedPane: Pane? = nil
+
+    /// Expand `pane` (collapsing the other) while a card is open.
+    func switchFocus(to pane: Pane) {
+        withAnimation(.easeInOut(duration: 0.22)) { focusedPane = pane }
+    }
+
     /// A highlighted term plus the context the explain endpoint needs (the
     /// sentence and explain direction) and where it sits, so the text can draw a
     /// persistent marker over it.
@@ -747,8 +758,8 @@ final class QuickTranslateModel: ObservableObject {
         let tgt = termLang == "EN" ? "ES" : "EN"
         let sentence = pane == .source ? sourceText : targetText
         let item = LearnTerm(text: clean, sentence: sentence, sourceLang: src, targetLang: tgt, pane: pane, range: range)
-        // Animated: opening the card tightens both panes and slides the card
-        // section in below them.
+        // Animated: opening the card collapses the other pane to its header
+        // and slides the card section in below.
         withAnimation(.easeInOut(duration: 0.22)) {
             // Re-selecting the exact same span just focuses it.
             if let i = terms.firstIndex(where: { $0.pane == pane && NSEqualRanges($0.range, range) }) {
@@ -759,16 +770,20 @@ final class QuickTranslateModel: ObservableObject {
                 terms.append(item)
                 activeTermIndex = terms.count - 1
             }
+            focusedPane = pane
         }
         loadCardIfNeeded(item)
     }
 
-    /// Move focus between the selected terms.
+    /// Move focus between the selected terms (follows the term's pane).
     func stepTerm(by delta: Int) {
         guard !terms.isEmpty else { return }
         let current = activeTermIndex ?? 0
         let next = (current + delta + terms.count) % terms.count
-        activeTermIndex = next
+        withAnimation(.easeInOut(duration: 0.22)) {
+            activeTermIndex = next
+            focusedPane = terms[next].pane
+        }
         loadCardIfNeeded(terms[next])
     }
 
@@ -784,6 +799,7 @@ final class QuickTranslateModel: ObservableObject {
             cardErrors[key] = nil
             terms.remove(at: i)
             activeTermIndex = terms.isEmpty ? nil : min(i, terms.count - 1)
+            focusedPane = activeTerm?.pane
         }
     }
 
@@ -829,6 +845,7 @@ final class QuickTranslateModel: ObservableObject {
         cards = [:]
         loadingTerms = []
         cardErrors = [:]
+        focusedPane = nil
     }
 }
 
@@ -868,20 +885,12 @@ struct QuickTranslateView: View {
     /// with source + translation both capped, the whole popover stays well
     /// under half the screen even for long pasted text.
     static let textBoxMaxHeight: CGFloat = 160
-    /// Tighter cap while an explain card is open below the two panes, so the
-    /// card always fits without pushing the popover past the window's max
-    /// height (both panes stay visible — the card must never cost you the
-    /// translation). Worst-case budget: 2×(header 26 + box ≤88 + chrome 20)
-    /// + dividers + 14pt gaps + explainMaxHeight + 32 padding ≈ 598, just
-    /// under the panel's 600 cap.
-    static let textBoxMaxHeightWithCard: CGFloat = 88
-    /// Cap for the explain card; taller cards scroll internally.
+    /// Cap for the explain card; taller cards scroll internally. While a card
+    /// is open only ONE pane stays expanded (the other collapses to its
+    /// header), so the worst case — header 26 + box 160+20 + collapsed header
+    /// 26 + card 220 + dividers/gaps/padding — lands around 570, under the
+    /// panel's 600 cap without tightening the expanded box.
     static let explainMaxHeight: CGFloat = 220
-
-    /// Live cap for both text panes — tightens while a term's card is open.
-    private var textBoxCap: CGFloat {
-        model.activeTerm == nil ? QuickTranslateView.textBoxMaxHeight : QuickTranslateView.textBoxMaxHeightWithCard
-    }
     /// How many recent entries show inline under the source card in History.
     /// Older ones live in the main app's History screen, reached via
     /// `fullHistoryLink`.
@@ -980,7 +989,7 @@ struct QuickTranslateView: View {
                     text: isSource ? model.sourceText : model.targetText,
                     height: height,
                     width: QuickTranslateView.cardTextWidth,
-                    maxHeight: textBoxCap,
+                    maxHeight: QuickTranslateView.textBoxMaxHeight,
                     minHeight: QuickTranslateView.textBoxMinHeight,
                     highlights: model.highlights(for: pane),
                     isEditable: editing,
@@ -1056,18 +1065,28 @@ struct QuickTranslateView: View {
     /// switching between History and a translate result reads as that one box
     /// updating in place (Linear's persistent-viewport pattern: swap the
     /// content, not the container).
+    ///
+    /// While an explain card is open only ONE pane keeps its text box; the
+    /// other collapses to just its header (its 26pt row stays, so nothing
+    /// jumps), which becomes the tap target to switch — expanding it to
+    /// select words there too.
     @ViewBuilder
     private var sourceCardSection: some View {
+        let sourceCollapsed = model.activeTerm != nil && model.focusedPane == .target
+        let targetCollapsed = model.activeTerm != nil && model.focusedPane != .target
+
         HStack(alignment: .center) {
             if model.mode == .history {
                 Text("Translate")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Palette.foreground)
+            } else if sourceCollapsed {
+                expandButton(for: .source)
             } else {
                 cardLabel(QuickTranslateModel.languageName(model.detectedLang))
             }
             Spacer()
-            if model.mode == .translate {
+            if model.mode == .translate, !sourceCollapsed {
                 QuickIconButton(system: model.sourceEditing ? "checkmark" : "pencil") {
                     if model.sourceEditing { model.commitEdit() } else { model.beginEdit() }
                 }
@@ -1096,8 +1115,11 @@ struct QuickTranslateView: View {
             .buttonStyle(.plain)
             .handCursor()
         }
+        .frame(height: 26)
 
-        sourceCard
+        if !sourceCollapsed {
+            sourceCard
+        }
 
         if model.mode == .history {
             if !model.historyEntries.isEmpty {
@@ -1118,7 +1140,15 @@ struct QuickTranslateView: View {
             }
         } else if !model.sourceEditing {
             Divider().overlay(Palette.border).opacity(0.6)
-            paneView(.target, height: $targetHeight)
+            if targetCollapsed {
+                HStack {
+                    expandButton(for: .target)
+                    Spacer()
+                }
+                .frame(height: 26)
+            } else {
+                paneView(.target, height: $targetHeight)
+            }
 
             if model.activeTerm != nil {
                 Divider().overlay(Palette.border).opacity(0.6)
@@ -1129,6 +1159,24 @@ struct QuickTranslateView: View {
                 selectHint
             }
         }
+    }
+
+    /// The collapsed pane's header-as-button: same label in the same spot,
+    /// plus a chevron so it reads as expandable. Tapping brings that pane's
+    /// text back (collapsing the other) so words can be selected there too.
+    private func expandButton(for pane: QuickTranslateModel.Pane) -> some View {
+        Button(action: { model.switchFocus(to: pane) }) {
+            HStack(spacing: 5) {
+                cardLabel(QuickTranslateModel.languageName(model.language(for: pane)))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(Palette.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Show this text")
+        .handCursor()
     }
 
     /// One quiet line under the result teaching the core learning gesture.
@@ -1174,7 +1222,7 @@ struct QuickTranslateView: View {
                 text: model.sourceText,
                 height: $sourceHeight,
                 width: QuickTranslateView.cardTextWidth,
-                maxHeight: textBoxCap,
+                maxHeight: QuickTranslateView.textBoxMaxHeight,
                 minHeight: QuickTranslateView.textBoxMinHeight,
                 highlights: model.highlights(for: .source),
                 isEditable: editing,
