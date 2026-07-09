@@ -954,6 +954,11 @@ struct QuickTranslateView: View {
                     .handCursor()
                 }
             }
+            // Reserve the icon-row height even while there are no icons yet
+            // (target pane while streaming), and fade them in when the text
+            // lands — otherwise their appearance pushes the card down.
+            .frame(height: 26)
+            .animation(.easeOut(duration: 0.2), value: text.isEmpty)
             paneText(pane, height: height)
                 .cardChrome()
         }
@@ -990,10 +995,17 @@ struct QuickTranslateView: View {
                         .font(.system(size: 15))
                         .foregroundStyle(Palette.tertiary)
                         .allowsHitTesting(false)
-                } else if !isSource, model.phase == .streaming, model.targetText.isEmpty {
-                    Text("Translating…")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Palette.tertiary)
+                } else if !isSource, !model.revealed {
+                    // Skeleton while the first delta is in flight. Keyed to
+                    // `revealed` (not text-emptiness) so its removal runs inside
+                    // `reveal()`'s withAnimation — it cross-fades with the text
+                    // instead of popping out. Sized to sit within the reserved
+                    // `textBoxMinHeight`, so short results land with no shift.
+                    VStack(alignment: .leading, spacing: 8) {
+                        shimmerBar(width: 220, height: 12)
+                        shimmerBar(width: 150, height: 12)
+                    }
+                    .padding(.top, 4)
                 }
             }
         }
@@ -1965,7 +1977,14 @@ private struct SelectableText: NSViewRepresentable {
         let target = min(max(full, minHeight), maxHeight)
         scroll.hasVerticalScroller = full > maxHeight + 0.5
         if abs(target - height) > 0.5 {
-            DispatchQueue.main.async { height = target }
+            // Animated so the box grows/shrinks smoothly as content changes
+            // (streamed deltas, typing past a wrap) instead of snapping a line
+            // at a time. Must stay shorter than the popover window's deferred
+            // shrink (0.32s in `QuickTranslatePanel.resize`) so the window
+            // never clips a box that's still animating.
+            DispatchQueue.main.async {
+                withAnimation(.easeOut(duration: 0.18)) { height = target }
+            }
         }
     }
 
