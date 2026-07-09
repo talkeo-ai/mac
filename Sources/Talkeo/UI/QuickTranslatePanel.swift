@@ -995,6 +995,10 @@ struct QuickTranslateView: View {
 
     // MARK: History (shown when Translate is tapped with nothing selected)
 
+    /// How many recent entries show inline. Older ones live in the main app's
+    /// History screen, reached via `fullHistoryLink` below.
+    private static let recentHistoryCount = 5
+
     private var historyView: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -1020,20 +1024,7 @@ struct QuickTranslateView: View {
                 .handCursor()
             }
 
-            // Start a fresh translation from a blank input.
-            Button(action: { model.startBlank() }) {
-                HStack(spacing: 8) {
-                    Image(systemName: "square.and.pencil").font(.system(size: 13, weight: .semibold))
-                    Text("New translation").font(.system(size: 13, weight: .medium))
-                    Spacer(minLength: 0)
-                }
-                .foregroundStyle(Palette.foreground)
-                .padding(.vertical, 9)
-                .padding(.horizontal, 10)
-                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.elevated.opacity(0.5)))
-            }
-            .buttonStyle(.plain)
-            .handCursor()
+            NewTranslationRow(action: { model.startBlank() })
 
             if model.historyEntries.isEmpty {
                 Text("No translations yet.")
@@ -1041,20 +1032,43 @@ struct QuickTranslateView: View {
                     .foregroundStyle(Palette.tertiary)
                     .padding(.vertical, 2)
             } else {
-                ScrollView {
-                    VStack(spacing: 2) {
-                        ForEach(model.historyEntries) { entry in
-                            HistoryRow(
-                                entry: entry,
-                                onOpen: { model.open(entry) },
-                                onDelete: { model.deleteHistory(entry) }
-                            )
+                Divider().overlay(Palette.border).opacity(0.4)
+                let recent = Array(model.historyEntries.prefix(QuickTranslateView.recentHistoryCount))
+                VStack(spacing: 0) {
+                    ForEach(Array(recent.enumerated()), id: \.element.id) { index, entry in
+                        HistoryRow(
+                            entry: entry,
+                            onOpen: { model.open(entry) },
+                            onDelete: { model.deleteHistory(entry) }
+                        )
+                        if index < recent.count - 1 {
+                            Divider().overlay(Palette.border).opacity(0.4)
                         }
                     }
                 }
-                .frame(maxHeight: 340)
+                fullHistoryLink
             }
         }
+    }
+
+    /// Jumps to the full history in the main app — the popover only ever shows
+    /// the last few. The dedicated History screen isn't built yet (it's a later
+    /// ROADMAP.md item), so this is a stub for that wiring.
+    private var fullHistoryLink: some View {
+        Button(action: {
+            // TODO: open the main app's History screen once it ships.
+        }) {
+            HStack(spacing: 4) {
+                Text("Full history")
+                    .font(.system(size: 12, weight: .medium))
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundStyle(Palette.muted)
+        }
+        .buttonStyle(.plain)
+        .handCursor()
+        .padding(.top, 4)
     }
 
     // MARK: Listen (TTS playback + select-to-hear, no explanations)
@@ -1971,33 +1985,42 @@ private struct HistoryRow: View {
     @State private var hover = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            // A real Button (not onTapGesture) so the first click registers even
-            // when the panel isn't key — tap gestures ignore acceptsFirstMouse.
-            Button(action: onOpen) {
-                HStack(alignment: .top, spacing: 10) {
+        // A real Button (not onTapGesture) so the first click registers even
+        // when the panel isn't key — tap gestures ignore acceptsFirstMouse.
+        Button(action: onOpen) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
                     Text("\(entry.detectedLang) → \(entry.translateLang)")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .tracking(0.4)
                         .foregroundStyle(Palette.tertiary)
-                        .frame(width: 54, alignment: .leading)
-                        .padding(.top, 2)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(entry.source)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(Palette.foreground)
-                            .lineLimit(1)
-                        Text(entry.target)
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(Palette.muted)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 6)
+                    Spacer()
+                    Text(HistoryRow.relative(entry.timestamp))
+                        .font(.system(size: 10))
+                        .foregroundStyle(Palette.tertiary)
+                        .opacity(hover ? 0 : 1)
                 }
-                .contentShape(Rectangle())
+                Text(entry.source)
+                    .font(.system(size: 13.5, weight: .medium))
+                    .foregroundStyle(Palette.foreground)
+                    .lineLimit(1)
+                Text(entry.target)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Palette.muted)
+                    .lineLimit(1)
             }
-            .buttonStyle(.plain)
-            .handCursor()
-
+            .padding(.vertical, 9)
+            .padding(.horizontal, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(hover ? Palette.elevated.opacity(0.35) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .handCursor()
+        .overlay(alignment: .topTrailing) {
             if hover {
                 Button(action: onDelete) {
                     Image(systemName: "xmark")
@@ -2010,19 +2033,10 @@ private struct HistoryRow: View {
                 .buttonStyle(.plain)
                 .help("Remove")
                 .handCursor()
-            } else {
-                Text(HistoryRow.relative(entry.timestamp))
-                    .font(.system(size: 10))
-                    .foregroundStyle(Palette.tertiary)
-                    .padding(.top, 2)
+                .padding(.top, 9)
+                .padding(.trailing, 4)
             }
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(hover ? Palette.elevated.opacity(0.5) : Color.clear)
-        )
         .onHover { hover = $0 }
     }
 
@@ -2030,6 +2044,39 @@ private struct HistoryRow: View {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
         return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+
+/// Flat "start fresh" row atop the history list — matches the list rows below
+/// instead of standing out as a filled button, for a quieter, more minimal menu.
+private struct NewTranslationRow: View {
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Palette.foreground)
+                    .frame(width: 20, height: 20)
+                    .background(Circle().fill(Palette.elevated))
+                Text("New translation")
+                    .font(.system(size: 13.5, weight: .medium))
+                    .foregroundStyle(Palette.foreground)
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(hover ? Palette.elevated.opacity(0.35) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .handCursor()
+        .onHover { hover = $0 }
     }
 }
 
@@ -2304,6 +2351,27 @@ private struct QuickPreviewClient: TransformClient {
             model.revealed = true
             model.phase = .done
         }
+}
+
+private struct QuickPreviewHistoryStore: HistoryStore {
+    let entries: [HistoryEntry]
+    func all() -> [HistoryEntry] { entries }
+    func add(_ entry: HistoryEntry) {}
+    func remove(id: String) {}
+    func clear() {}
+}
+
+#Preview("History") {
+    let stub = QuickPreviewHistoryStore(entries: [
+        HistoryEntry(id: "1", source: "The committee reached a tentative agreement.", target: "El comité alcanzó un acuerdo tentativo.", detectedLang: "EN", translateLang: "ES", timestamp: Date(timeIntervalSinceNow: -120)),
+        HistoryEntry(id: "2", source: "Necesito hablar con vos mañana.", target: "I need to talk to you tomorrow.", detectedLang: "ES", translateLang: "EN", timestamp: Date(timeIntervalSinceNow: -3600)),
+        HistoryEntry(id: "3", source: "Let's meet at noon.", target: "Reunámonos al mediodía.", detectedLang: "EN", translateLang: "ES", timestamp: Date(timeIntervalSinceNow: -7200)),
+        HistoryEntry(id: "4", source: "¿Podés enviarme el archivo?", target: "Can you send me the file?", detectedLang: "ES", translateLang: "EN", timestamp: Date(timeIntervalSinceNow: -90000)),
+    ])
+    let model = QuickTranslateModel(client: QuickPreviewClient(), history: stub)
+    return QuickTranslateView(model: model, onResize: { _ in }, onClose: {})
+        .padding(40)
+        .onAppear { model.showHistory() }
 }
 
 #Preview("Improve") {
