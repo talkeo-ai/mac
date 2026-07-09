@@ -53,6 +53,11 @@ final class QuickTranslatePanel {
     /// the app, not the popover. Same wiring seam as `onOpenFullHistory`.
     var onOpenImproveHistory: (() -> Void)?
 
+    /// "Full history" tapped in Listen's compose view. Same shape as
+    /// `onOpenFullHistory` but a separate hook — Listen's history lives in its
+    /// own store and (eventually) its own app page, not Translate's.
+    var onOpenFullListenHistory: (() -> Void)?
+
     /// Fires with `true` when the popover comes on screen and `false` once it
     /// leaves, whatever the path (dismiss click, close button, Replace). The
     /// owner uses it to hold the floating bar revealed while we're open.
@@ -103,13 +108,15 @@ final class QuickTranslatePanel {
         var onReplaceRef: ((String) -> Void)?
         var onOpenFullHistoryRef: (() -> Void)?
         var onOpenImproveHistoryRef: (() -> Void)?
+        var onOpenFullListenHistoryRef: (() -> Void)?
         let view = QuickTranslateView(
             model: model,
             onResize: { onResizeRef?($0) },
             onClose: { onCloseRef?() },
             onReplace: { onReplaceRef?($0) },
             onOpenFullHistory: { onOpenFullHistoryRef?() },
-            onOpenImproveHistory: { onOpenImproveHistoryRef?() }
+            onOpenImproveHistory: { onOpenImproveHistoryRef?() },
+            onOpenFullListenHistory: { onOpenFullListenHistoryRef?() }
         )
         let hosting = FirstMouseHostingView(rootView: view)
         hosting.frame = NSRect(origin: .zero, size: NSSize(width: Self.width, height: Self.nominalHeight))
@@ -127,6 +134,7 @@ final class QuickTranslatePanel {
             self?.hide()
             self?.onOpenImproveHistory?()
         }
+        onOpenFullListenHistoryRef = { [weak self] in self?.onOpenFullListenHistory?() }
     }
 
     func show(text: String) {
@@ -174,7 +182,15 @@ final class QuickTranslatePanel {
     }
 
     /// Listen tapped with text selected — open the Listen card (auto-plays).
+    /// Toggle: re-tapping Listen for the text already playing means "close
+    /// it", not "restart it" — mirrors `show(text:)`. A different selection
+    /// still switches content instead of dismissing.
     func listen(text: String) {
+        if panel.isVisible, model.mode == .listen,
+           model.sourceText == text.trimmingCharacters(in: .whitespacesAndNewlines) {
+            hide()
+            return
+        }
         model.listen(text)
         present()
     }
@@ -188,6 +204,17 @@ final class QuickTranslatePanel {
             return
         }
         model.showHistory()
+        present()
+    }
+
+    /// Listen tapped with nothing selected — show Listen's own history list
+    /// (mirrors `showHistory()`, including the toggle-to-close).
+    func showListenHistory() {
+        if panel.isVisible {
+            hide()
+            return
+        }
+        model.showListenHistory()
         present()
     }
 
@@ -407,6 +434,13 @@ final class QuickTranslateModel: ObservableObject {
     @Published var mode: Mode = .translate
     @Published var historyEntries: [HistoryEntry] = []
 
+    /// True while Listen shows the compose/history view instead of the
+    /// playback transport. Kept distinct from `sourceText.isEmpty` on purpose:
+    /// `SelectableText` reports every keystroke through `sourceText`, so using
+    /// its emptiness as the discriminator would flip the view away mid-type the
+    /// instant the compose box stopped being empty.
+    @Published var listenComposing: Bool = false
+
     /// Playback speed for the Listen card. These feed `AVAudioPlayer.rate` (the
     /// cloud-voice player), where 1.0 is normal speed — so the values are the
     /// literal multipliers the labels advertise (0.75×/1×/1.25×).
@@ -514,16 +548,19 @@ final class QuickTranslateModel: ObservableObject {
     private let client: TransformClient
     private let history: HistoryStore
     private let improveHistory: ImproveHistoryStore
+    private let listenHistory: ListenHistoryStore
     private var task: Task<Void, Never>?
 
     init(
         client: TransformClient = TalkeoTransformClient(),
         history: HistoryStore = LocalHistoryStore.shared,
-        improveHistory: ImproveHistoryStore = LocalImproveHistoryStore.shared
+        improveHistory: ImproveHistoryStore = LocalImproveHistoryStore.shared,
+        listenHistory: ListenHistoryStore = LocalListenHistoryStore.shared
     ) {
         self.client = client
         self.history = history
         self.improveHistory = improveHistory
+        self.listenHistory = listenHistory
         // Card arrival animates exactly as it used to when the load lived here.
         self.session = ExplainSession(client: client, cardAnimation: .easeOut(duration: 0.2))
         sessionChanges = session.objectWillChange.sink { [weak self] _ in
@@ -534,6 +571,7 @@ final class QuickTranslateModel: ObservableObject {
     func translate(_ text: String) {
         task?.cancel()
         clearSelection()
+        TTSAudioPlayer.shared.stop() // don't leave a Listen clip playing under a new mode
         // Animated: `sourceCard` is one persistent view bound to `sourceText`
         // (see `QuickTranslateView`) that just becomes read-only here, so this
         // transition updates it in place instead of swapping the view tree.
@@ -581,12 +619,49 @@ final class QuickTranslateModel: ObservableObject {
     func listen(_ text: String) {
         task?.cancel()
         clearSelection()
-        mode = .listen
-        sourceEditing = false
-        sourceText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        detectedLang = QuickTranslateModel.detectLanguage(sourceText)
+        // Animated: mirrors `translate(_:)`, so leaving the compose/history view
+        // for a playing clip transitions instead of popping.
+        withAnimation(.easeInOut(duration: 0.22)) {
+            mode = .listen
+            listenComposing = false
+            sourceEditing = false
+            sourceText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            detectedLang = QuickTranslateModel.detectLanguage(sourceText)
+        }
         guard !sourceText.isEmpty else { return }
+        recordListenHistory()
         playFull()
+    }
+
+    /// Switch Listen into its compose view (Listen tapped with nothing
+    /// selected): an empty, editable text box. Mirrors `showHistory()`, but
+    /// keeps `mode == .listen` — `listenComposing` is what picks the compose
+    /// view over the playback transport. Entries still accumulate in
+    /// `listenHistory` (for the eventual Full History page); the popover
+    /// itself doesn't list them inline — "Full history" is where they live.
+    func showListenHistory() {
+        task?.cancel()
+        clearSelection()
+        TTSAudioPlayer.shared.stop() // don't leave a clip playing under the compose view
+        sourceEditing = false
+        sourceText = ""
+        mode = .listen
+        listenComposing = true
+    }
+
+    /// Save the text locally so it can be replayed later. Recorded eagerly (on
+    /// open, not gated on the TTS fetch succeeding) — simpler than threading a
+    /// completion signal through `TTSAudioPlayer`, at the cost of a failed
+    /// lookup still showing up in history.
+    private func recordListenHistory() {
+        let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        listenHistory.add(ListenHistoryEntry(
+            id: UUID().uuidString,
+            text: text,
+            detectedLang: detectedLang,
+            timestamp: Date()
+        ))
     }
 
     /// Load + play the whole text through the real TTS voice.
@@ -638,6 +713,7 @@ final class QuickTranslateModel: ObservableObject {
     func improve(_ text: String, targetIsTerminal: Bool = false, fromCompose: Bool = false) {
         task?.cancel()
         clearSelection()
+        TTSAudioPlayer.shared.stop() // don't leave a Listen clip playing under a new mode
         withAnimation(.easeInOut(duration: 0.22)) {
             mode = .improve
             sourceEditing = false
@@ -829,6 +905,7 @@ final class QuickTranslateModel: ObservableObject {
     func showHistory() {
         task?.cancel()
         clearSelection()
+        TTSAudioPlayer.shared.stop() // don't leave a Listen clip playing under a new mode
         sourceEditing = false
         sourceText = ""
         targetText = ""
@@ -982,6 +1059,11 @@ struct QuickTranslateView: View {
     var onOpenFullHistory: () -> Void = {}
     /// "History" tapped in Improve's compose — open the app's Improve screen.
     var onOpenImproveHistory: () -> Void = {}
+
+    /// "Full history" tapped from Listen's compose view — Listen's own
+    /// history, not Translate's (see `onOpenFullListenHistory` on the panel).
+    var onOpenFullListenHistory: () -> Void = {}
+    @State private var listenVoiceMock: String = QuickTranslateView.mockVoices[0]
     @State private var sourceHeight: CGFloat = QuickTranslateView.textBoxMinHeight
     @State private var targetHeight: CGFloat = QuickTranslateView.textBoxMinHeight
     /// Measured natural height of the improve correction card, so it scrolls
@@ -1015,6 +1097,9 @@ struct QuickTranslateView: View {
     /// Older ones live in the main app's History screen, reached via
     /// `fullHistoryLink`.
     private static let recentHistoryCount = 5
+    /// Placeholder voice names for Listen's voice picker — UI mockup only, not
+    /// wired to `TTSAudioPlayer` yet (there's a single voice today).
+    private static let mockVoices = ["Aria", "Nova", "Ember"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1424,30 +1509,160 @@ struct QuickTranslateView: View {
 
     // MARK: Listen (TTS playback + select-to-hear, no explanations)
 
+    /// Compose/history (nothing loaded yet) vs. playback (a text is loaded and
+    /// playing/paused) — mirrors Translate's persistent-card pattern: one mode,
+    /// one section that mutates, picked by `listenComposing` rather than
+    /// `sourceText.isEmpty` (see that flag's doc comment for why).
     @ViewBuilder
     private var listenView: some View {
-        // Header.
+        if model.listenComposing {
+            listenComposeSection
+        } else {
+            listenPlaybackSection
+        }
+    }
+
+    /// Listen tapped with nothing selected: an empty, editable box (type or
+    /// paste text to hear it) plus an action row — no inline recent list
+    /// (that lives behind "Full history" instead, once the app page exists).
+    @ViewBuilder
+    private var listenComposeSection: some View {
         HStack {
             cardLabel("Listen")
             Spacer()
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Palette.muted)
-                    .frame(width: 20, height: 20)
-                    .contentShape(Rectangle())
+            listenCloseButton
+        }
+        .frame(height: 26)
+
+        ZStack(alignment: .topLeading) {
+            SelectableText(
+                text: model.sourceText,
+                height: $sourceHeight,
+                width: QuickTranslateView.cardTextWidth,
+                maxHeight: QuickTranslateView.textBoxMaxHeight,
+                minHeight: QuickTranslateView.textBoxMinHeight,
+                isEditable: true,
+                onTextChange: { model.sourceText = $0 },
+                onCommit: commitListenCompose
+            ) { _, _ in }
+            .frame(height: sourceHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if model.sourceText.isEmpty {
+                Text("Type or paste text to listen to…")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Palette.tertiary)
+                    .allowsHitTesting(false)
+            }
+        }
+        .cardChrome()
+
+        HStack(spacing: 10) {
+            // Goes to the app's Listen history (no inline list here — mirrors
+            // Improve's compose row: history lives in the app, not the popover).
+            Button(action: onOpenFullListenHistory) {
+                HStack(spacing: 4) {
+                    Text("Full history")
+                        .font(.system(size: 12, weight: .medium))
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundStyle(Palette.muted)
             }
             .buttonStyle(.plain)
             .handCursor()
+
+            Spacer()
+
+            listenVoicePicker
+
+            let hasText = !model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            Button(action: commitListenCompose) {
+                HStack(spacing: 6) {
+                    Text("Listen")
+                        .font(.system(size: 13, weight: .semibold))
+                    // Return-key hint: pressing Return in the box above does
+                    // the same thing as tapping this button.
+                    Text("⏎")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.white.opacity(0.18)))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(Capsule().fill(Color.accentColor))
+                // `.disabled` alone wouldn't dim a custom-styled button (no
+                // standard control to read `isEnabled`) — match the pattern
+                // `ListenTransport.stop` uses and fade it explicitly.
+                .opacity(hasText ? 1 : 0.4)
+            }
+            .buttonStyle(.plain)
+            .disabled(!hasText)
+            .handCursor()
         }
+        .padding(.top, 2)
+    }
+
+    /// Voice picker — UI mockup only (see `mockVoices`); doesn't affect
+    /// playback yet.
+    private var listenVoicePicker: some View {
+        Menu {
+            ForEach(QuickTranslateView.mockVoices, id: \.self) { voice in
+                Button(voice) { listenVoiceMock = voice }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 10, weight: .medium))
+                Text(listenVoiceMock)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(Palette.muted)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Palette.elevated.opacity(0.6)))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .handCursor()
+    }
+
+    /// Shared by the compose box's Return-to-commit and the explicit Listen
+    /// button — same trim-guard-play the rest of the panel's compose flows use.
+    private func commitListenCompose() {
+        let trimmed = model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        model.listen(trimmed)
+    }
+
+    /// A text is loaded: the karaoke-highlighted pane, the transport, and
+    /// (once a word's been picked) its pager footer.
+    @ViewBuilder
+    private var listenPlaybackSection: some View {
+        HStack {
+            cardLabel("Listen")
+            Spacer()
+            listenCloseButton
+        }
+        .frame(height: 26)
 
         // The text — tap a word to jump the playhead there; the word being
         // spoken is highlighted as it plays (its own observing subview, so it
         // refreshes per word, not on the 60 fps progress ticks).
         ListenTextPane(model: model, height: $sourceHeight)
+            .cardChrome()
 
         // Transport: play / pause / stop, a seekable timeline, and speed.
         ListenTransport(model: model)
+
+        // Make the tap-to-jump gesture discoverable, same spirit as
+        // Translate's `selectHint` — only until the user's picked a word once.
+        if model.terms.isEmpty {
+            listenHint
+        }
 
         // The currently-selected word: page with ‹ › (each jumps the playhead).
         if let term = model.activeTerm {
@@ -1473,6 +1688,32 @@ struct QuickTranslateView: View {
                 removeButton { model.removeActiveListen() }
             }
         }
+    }
+
+    /// Consistent close-button chrome — matches `sourceCardSection`'s (26×26
+    /// circle over `Palette.elevated`), shared by both Listen sub-states.
+    private var listenCloseButton: some View {
+        Button(action: onClose) {
+            Image(systemName: "xmark")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(Palette.muted)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Palette.elevated))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .handCursor()
+    }
+
+    private var listenHint: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "hand.tap")
+                .font(.system(size: 10, weight: .medium))
+            Text("Tap any word to jump there")
+                .font(.system(size: 11))
+        }
+        .foregroundStyle(Palette.tertiary)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     /// ‹ 1/2 › pager over the selected fragments (plays each as you page).
@@ -2038,11 +2279,14 @@ struct QuickTranslateView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func shimmerBar(width: CGFloat, height: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: 4, style: .continuous)
-            .fill(Palette.elevated)
-            .frame(width: width, height: height)
-    }
+}
+
+/// Shared shimmer shape (top-level so both `QuickTranslateView` and
+/// `ListenTransport` — a separate type — can use it).
+private func shimmerBar(width: CGFloat, height: CGFloat) -> some View {
+    RoundedRectangle(cornerRadius: 4, style: .continuous)
+        .fill(Palette.elevated)
+        .frame(width: width, height: height)
 }
 
 // MARK: - Explain card view
@@ -2522,7 +2766,11 @@ private struct ListenTransport: View {
                 speed
             }
             if loading {
-                caption("Loading the voice…")
+                // Shimmer, not a flat caption: the controls above are already in
+                // their final shape while loading (only enabled-ness changes),
+                // so this just borrows Translate's "in progress" language for
+                // the one bit of text that does change.
+                shimmerBar(width: 130, height: 11)
             } else if failed {
                 caption("Couldn't load the voice — tap ↻ to retry.")
             }
