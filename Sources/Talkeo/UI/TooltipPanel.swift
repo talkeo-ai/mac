@@ -263,7 +263,7 @@ struct TooltipView: View {
             }
             Divider().opacity(0.4)
             MenuRow(
-                kind: .system("sparkles"),
+                kind: .system("text.badge.checkmark"),
                 title: "Improve copy",
                 subtitle: "Polish the selected text"
             ) {
