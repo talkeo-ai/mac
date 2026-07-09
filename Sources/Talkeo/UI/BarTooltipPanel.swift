@@ -15,8 +15,12 @@ final class BarTooltipPanel {
     private var showTimer: Timer?
     private var lastHiddenAt: CFTimeInterval = 0
 
-    private static let showDelay: TimeInterval = 0.45
-    /// Grace period after hiding during which a new tip skips the delay.
+    /// Radix/shadcn's default `delayDuration` (700ms) — long enough to never
+    /// bother a user who already knows the buttons, short enough to answer a
+    /// genuine "what is this?" hover.
+    private static let showDelay: TimeInterval = 0.7
+    /// Grace period after hiding during which a new tip skips the delay
+    /// (Radix's `skipDelayDuration` behavior).
     private static let stickyWindow: TimeInterval = 0.35
 
     init() {
@@ -70,16 +74,10 @@ final class BarTooltipPanel {
             x: target.minX - size.width,
             y: target.midY - size.height / 2
         )
-        let wasVisible = panel.isVisible
         panel.setFrame(NSRect(origin: origin, size: size), display: true)
-        if !wasVisible {
-            panel.alphaValue = 0
-            panel.orderFrontRegardless()
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.12
-                panel.animator().alphaValue = 1
-            }
-        }
+        // The entrance is animated by the SwiftUI content itself (fade + zoom
+        // from the tail side, shadcn-style), so the window just appears.
+        panel.orderFrontRegardless()
     }
 }
 
@@ -88,6 +86,11 @@ final class BarTooltipPanel {
 struct BarTooltipView: View {
     let text: String
     @Environment(\.colorScheme) private var colorScheme
+    /// Drives the entrance (fade + slight zoom from the tail side, shadcn's
+    /// `fade-in zoom-in-95` pattern). The hosting view is fresh per
+    /// presentation, so this runs on every appearance, including instant
+    /// swaps between buttons.
+    @State private var appeared = false
 
     /// shadcn-style inversion: dark chip on light appearance, light on dark —
     /// maximum contrast against whatever is behind, without being loud.
@@ -110,6 +113,11 @@ struct BarTooltipView: View {
         .shadow(color: .black.opacity(0.16), radius: 4, y: 1)
         .padding(5) // headroom for the shadow inside the tight window
         .fixedSize()
+        .opacity(appeared ? 1 : 0)
+        .scaleEffect(appeared ? 1 : 0.95, anchor: .trailing) // grow out of the tail, toward the button
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.18)) { appeared = true }
+        }
     }
 }
 
