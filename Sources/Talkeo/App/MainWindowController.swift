@@ -140,7 +140,7 @@ enum MainSection: String, CaseIterable, Identifiable {
         case .improve: return "text.badge.checkmark"
         case .listen: return "speaker.wave.2.fill"
         case .capture: return "text.viewfinder"
-        case .transcript: return "list.bullet.rectangle.fill"
+        case .transcript: return "waveform"
         case .englishLevel: return "chart.bar.fill"
         case .settings: return "gearshape.fill"
         }
@@ -235,15 +235,7 @@ struct MainWindowView: View {
                 comingSoon: true
             )
         case .translate:
-            ToolPage(
-                section: .translate,
-                summary: "Instant translation of whatever you select, in any app.",
-                steps: [
-                    "Select text anywhere — browser, editor, terminal.",
-                    "Click the translate button in the floating bar.",
-                    "Read the translation in place; it's saved to your transcript."
-                ]
-            )
+            TranslatePage()
         case .improve:
             ToolPage(
                 section: .improve,
@@ -272,7 +264,12 @@ struct MainWindowView: View {
                 comingSoon: true
             )
         case .transcript:
-            TranscriptPage()
+            ToolPage(
+                section: .transcript,
+                summary: "Real-time transcription of what you hear — live subtitles for meetings, videos and calls.",
+                steps: [],
+                comingSoon: true
+            )
         case .englishLevel:
             EnglishLevelPage()
         case .settings:
@@ -341,26 +338,7 @@ private struct ToolPage: View {
                         .padding(.vertical, 7)
                         .background(Capsule().fill(Palette.elevated))
                 } else {
-                    VStack(alignment: .leading, spacing: 10) {
-                        ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
-                            HStack(alignment: .center, spacing: 14) {
-                                Text("\(index + 1)")
-                                    .font(.system(size: 13, weight: .bold))
-                                    .foregroundStyle(Palette.foreground)
-                                    .frame(width: 26, height: 26)
-                                    .background(Circle().fill(Palette.elevated))
-                                Text(step)
-                                    .font(.system(size: 14))
-                                    .foregroundStyle(Palette.foreground)
-                                Spacer(minLength: 0)
-                            }
-                            .padding(16)
-                            .background(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .fill(Palette.elevated)
-                            )
-                        }
-                    }
+                    StepsList(steps: steps)
                 }
             }
             .frame(maxWidth: 680, alignment: .leading)
@@ -372,19 +350,61 @@ private struct ToolPage: View {
     }
 }
 
-// MARK: - Transcript
+/// Numbered how-to steps shared by the tool pages.
+private struct StepsList: View {
+    let steps: [String]
 
-/// Everything the user has translated, straight from the local history store.
-private struct TranscriptPage: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                HStack(alignment: .center, spacing: 14) {
+                    Text("\(index + 1)")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Palette.foreground)
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Palette.elevated))
+                    Text(step)
+                        .font(.system(size: 14))
+                        .foregroundStyle(Palette.foreground)
+                    Spacer(minLength: 0)
+                }
+                .padding(16)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Palette.elevated)
+                )
+            }
+        }
+    }
+}
+
+// MARK: - Translate
+
+/// The translate tool page: how it works plus the local translation history
+/// (the history lives here, where it's produced — Transcript is a different,
+/// future feature: real-time transcription).
+private struct TranslatePage: View {
     @State private var entries: [HistoryEntry] = []
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 PageHeader(
-                    section: .transcript,
-                    subtitle: "Everything you've translated with Talkeo."
+                    section: .translate,
+                    subtitle: "Instant translation of whatever you select, in any app."
                 )
+
+                StepsList(steps: [
+                    "Select text anywhere — browser, editor, terminal.",
+                    "Click the translate button in the floating bar.",
+                    "Read the translation in place; it's saved to your history."
+                ])
+
+                Text("History".uppercased())
+                    .font(.system(size: 11, weight: .bold))
+                    .kerning(1.1)
+                    .foregroundStyle(Palette.tertiary)
+                    .padding(.top, 8)
 
                 if entries.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
@@ -404,7 +424,7 @@ private struct TranscriptPage: View {
                 } else {
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach(entries) { entry in
-                            TranscriptRow(entry: entry)
+                            HistoryRow(entry: entry)
                         }
                     }
                 }
@@ -419,7 +439,7 @@ private struct TranscriptPage: View {
     }
 }
 
-private struct TranscriptRow: View {
+private struct HistoryRow: View {
     let entry: HistoryEntry
 
     var body: some View {
