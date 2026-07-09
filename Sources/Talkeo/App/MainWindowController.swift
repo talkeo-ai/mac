@@ -36,7 +36,7 @@ final class MainWindowController: NSObject {
             defer: false
         )
         window.title = "Talkeo"
-        // The SPA draws its own chrome (custom sidebar, full-bleed content);
+        // The SPA draws its own chrome (icon rail + floating content card);
         // the titlebar is just the traffic lights floating over it.
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
@@ -102,13 +102,9 @@ final class MainWindowController: NSObject {
 
 // MARK: - Navigation
 
-/// Sections of the main window's left-hand menu. The first four mirror the
+/// Sections of the main window's left-hand rail. The first four mirror the
 /// floating bar's actions; the last two are the user-facing record (transcript
 /// of past translations, estimated English level).
-///
-/// Each section owns a solid accent color (Duolingo-style colorful menu): the
-/// icon always sits on its colored tile, and the selected row picks the color
-/// up in its background/label.
 enum MainSection: String, CaseIterable, Identifiable {
     case translate, improve, listen, capture, transcript, englishLevel
 
@@ -125,6 +121,14 @@ enum MainSection: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Short label for the narrow icon rail (the page keeps the full title).
+    var railTitle: String {
+        switch self {
+        case .englishLevel: return "Level"
+        default: return title
+        }
+    }
+
     var icon: String {
         switch self {
         case .translate: return "character.bubble.fill"
@@ -136,86 +140,65 @@ enum MainSection: String, CaseIterable, Identifiable {
         }
     }
 
-    var accent: Color {
-        switch self {
-        case .translate: return Palette.dynamic(0x1C7CF2, 0x3F97FF)   // blue
-        case .improve: return Palette.dynamic(0x8B5CF6, 0xA78BFA)     // violet
-        case .listen: return Palette.dynamic(0x16A34A, 0x34C97A)      // green
-        case .capture: return Palette.dynamic(0xF97316, 0xFF9040)     // orange
-        case .transcript: return Palette.dynamic(0x0D9DA8, 0x2BC4CF)  // teal
-        case .englishLevel: return Palette.dynamic(0xE0A800, 0xF5C518) // gold
-        }
-    }
-
     static let tools: [MainSection] = [.translate, .improve, .listen, .capture]
     static let progress: [MainSection] = [.transcript, .englishLevel]
 }
 
-// MARK: - Root view (SPA: custom solid sidebar + detail)
+// MARK: - Root view (SPA: icon rail + floating content card)
 
 struct MainWindowView: View {
     @State private var selection: MainSection = .translate
 
-    /// Sidebar surface, one step darker than the content like the reference
-    /// SPAs (solid, no vibrancy material).
-    private static let sidebarBackground = Palette.dynamic(0xF7F7F8, 0x161616)
+    /// Window backdrop — the rail sits directly on it and the content card
+    /// floats over it (Palette.surface is one step lighter, so the card
+    /// reads as raised in both appearances).
+    private static let backdrop = Palette.dynamic(0xF7F7F8, 0x161616)
 
     var body: some View {
         HStack(spacing: 0) {
-            sidebar
-            Divider().overlay(Palette.border)
+            rail
+
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Palette.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Palette.border, lineWidth: 1)
+                )
+                .padding([.top, .trailing, .bottom], 14)
         }
-        // Full-bleed SPA: the sidebar owns the titlebar strip too; the brand
-        // header's top padding keeps it clear of the traffic lights.
+        .background(Self.backdrop)
+        // Full-bleed SPA: the backdrop owns the titlebar strip too; the rail's
+        // top padding keeps the brand clear of the traffic lights.
         .ignoresSafeArea()
     }
 
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            brand
-                .padding(.horizontal, 12)
-                .padding(.top, 44)
-                .padding(.bottom, 24)
+    private var rail: some View {
+        VStack(spacing: 6) {
+            BrandMark(cornerRadius: 9)
+                .frame(width: 34, height: 34)
+                .padding(.top, 48)
+                .padding(.bottom, 22)
 
-            sectionLabel("Tools")
             ForEach(MainSection.tools) { item in
-                SidebarRow(item: item, isSelected: selection == item) { selection = item }
+                RailItem(item: item, isSelected: selection == item) { selection = item }
             }
 
-            sectionLabel("Your English")
-                .padding(.top, 20)
+            Divider()
+                .overlay(Palette.border)
+                .frame(width: 30)
+                .padding(.vertical, 10)
+
             ForEach(MainSection.progress) { item in
-                SidebarRow(item: item, isSelected: selection == item) { selection = item }
+                RailItem(item: item, isSelected: selection == item) { selection = item }
             }
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
-        .frame(width: 248)
+        .padding(.horizontal, 10)
+        .frame(width: 92)
         .frame(maxHeight: .infinity)
-        .background(Self.sidebarBackground)
-    }
-
-    private var brand: some View {
-        HStack(spacing: 10) {
-            BrandMark(cornerRadius: 8)
-                .frame(width: 30, height: 30)
-            Text("talkeo")
-                .font(.system(size: 22, weight: .bold))
-                .foregroundStyle(Palette.foreground)
-        }
-    }
-
-    private func sectionLabel(_ text: String) -> some View {
-        Text(text.uppercased())
-            .font(.system(size: 11, weight: .bold))
-            .kerning(1.1)
-            .foregroundStyle(Palette.tertiary)
-            .padding(.horizontal, 12)
-            .padding(.bottom, 6)
     }
 
     @ViewBuilder
@@ -266,9 +249,9 @@ struct MainWindowView: View {
     }
 }
 
-/// One entry of the sidebar menu: colored icon tile + bold label, with a solid
-/// selected state (tinted fill + accent border) and a quiet hover.
-private struct SidebarRow: View {
+/// One entry of the icon rail: big icon with its label underneath, monochrome.
+/// Selected lifts to full foreground on a soft tile; the rest stay muted.
+private struct RailItem: View {
     let item: MainSection
     let isSelected: Bool
     let action: () -> Void
@@ -276,31 +259,19 @@ private struct SidebarRow: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 11) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(item.accent)
-                    Image(systemName: item.icon)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 30, height: 30)
-
-                Text(item.title)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(isSelected ? item.accent : Palette.muted)
-
-                Spacer(minLength: 0)
+            VStack(spacing: 5) {
+                Image(systemName: item.icon)
+                    .font(.system(size: 19, weight: .medium))
+                    .frame(height: 22)
+                Text(item.railTitle)
+                    .font(.system(size: 10.5, weight: .semibold))
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .foregroundStyle(isSelected ? Palette.foreground : Palette.muted)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(isSelected ? item.accent.opacity(0.13) : (isHover ? Palette.elevated : Color.clear))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(isSelected ? item.accent.opacity(0.5) : Color.clear, lineWidth: 1.5)
+                    .fill(isSelected || isHover ? Palette.elevated : Color.clear)
             )
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
@@ -327,20 +298,20 @@ private struct ToolPage: View {
 
                 if comingSoon {
                     Text("Coming soon")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Palette.muted)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 7)
-                        .background(Capsule().fill(section.accent))
+                        .background(Capsule().fill(Palette.elevated))
                 } else {
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
                             HStack(alignment: .center, spacing: 14) {
                                 Text("\(index + 1)")
                                     .font(.system(size: 13, weight: .bold))
-                                    .foregroundStyle(.white)
+                                    .foregroundStyle(Palette.foreground)
                                     .frame(width: 26, height: 26)
-                                    .background(Circle().fill(section.accent))
+                                    .background(Circle().fill(Palette.elevated))
                                 Text(step)
                                     .font(.system(size: 14))
                                     .foregroundStyle(Palette.foreground)
@@ -357,7 +328,7 @@ private struct ToolPage: View {
             }
             .frame(maxWidth: 680, alignment: .leading)
             .padding(.horizontal, 56)
-            .padding(.top, 64)
+            .padding(.top, 56)
             .padding(.bottom, 48)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -403,7 +374,7 @@ private struct TranscriptPage: View {
             }
             .frame(maxWidth: 760, alignment: .leading)
             .padding(.horizontal, 56)
-            .padding(.top, 64)
+            .padding(.top, 56)
             .padding(.bottom, 48)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -427,10 +398,10 @@ private struct TranscriptRow: View {
             HStack(spacing: 10) {
                 Text("\(entry.detectedLang.uppercased()) → \(entry.translateLang.uppercased())")
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Palette.muted)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
-                    .background(Capsule().fill(MainSection.transcript.accent))
+                    .background(Capsule().stroke(Palette.border, lineWidth: 1))
                 Text(entry.timestamp.formatted(date: .abbreviated, time: .shortened))
                     .font(.system(size: 12))
                     .foregroundStyle(Palette.tertiary)
@@ -483,7 +454,7 @@ private struct EnglishLevelPage: View {
             }
             .frame(maxWidth: 680, alignment: .leading)
             .padding(.horizontal, 56)
-            .padding(.top, 64)
+            .padding(.top, 56)
             .padding(.bottom, 48)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -500,12 +471,12 @@ private struct PageHeader: View {
         VStack(alignment: .leading, spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(section.accent)
+                    .fill(Palette.elevated)
                 Image(systemName: section.icon)
-                    .font(.system(size: 25, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(Palette.foreground)
             }
-            .frame(width: 56, height: 56)
+            .frame(width: 54, height: 54)
 
             Text(section.title)
                 .font(.system(size: 28, weight: .bold))
