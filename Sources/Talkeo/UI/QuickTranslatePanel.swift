@@ -198,15 +198,16 @@ final class QuickTranslatePanel {
         var origin = NSPoint(x: leftAnchor, y: topAnchor - height)
         if origin.y < visible.minY + 8 { origin.y = visible.minY + 8 }
         if origin.y + height > visible.maxY - 8 { origin.y = visible.maxY - 8 - height }
-        let frame = NSRect(origin: origin, size: NSSize(width: Self.width, height: height))
-        // Animated so the window follows the content's own transition (mode
-        // switches, the target card revealing) instead of snapping around it —
-        // same duration as the SwiftUI-side `withAnimation` calls it pairs with.
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.22
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            panel.animator().setFrame(frame, display: true)
-        }
+        // Instant, not animated: this is a borderless panel whose rounded
+        // corners are drawn by SwiftUI (clipShape) over vibrancy, not a native
+        // window shape. Animating the actual window frame (tried this, reverted
+        // it) resizes the backing layer natively and the corner clip and the
+        // vibrancy material redraw visibly lag behind it for a frame or two —
+        // square corners flash mid-resize. The smooth part (the card morphing)
+        // already comes from SwiftUI's `matchedGeometryEffect`/`withAnimation`
+        // on the content; the window just needs to match the content's already-
+        // final size, not animate to it itself.
+        panel.setFrame(NSRect(origin: origin, size: NSSize(width: Self.width, height: height)), display: true, animate: false)
     }
 
     private func installDismissMonitor() {
@@ -793,8 +794,8 @@ struct QuickTranslateView: View {
     var onReplace: (String) -> Void = { _ in }
     /// "Full history" tapped — open the main app's History/Transcript screen.
     var onOpenFullHistory: () -> Void = {}
-    @State private var sourceHeight: CGFloat = 22
-    @State private var targetHeight: CGFloat = 22
+    @State private var sourceHeight: CGFloat = QuickTranslateView.textBoxMinHeight
+    @State private var targetHeight: CGFloat = QuickTranslateView.textBoxMinHeight
     /// Measured natural height of the improve correction card, so it scrolls
     /// internally past a cap instead of growing the popover off-screen.
     @State private var cardHeight: CGFloat = 120
@@ -811,6 +812,14 @@ struct QuickTranslateView: View {
     /// Width text lays out at inside a `cardChrome()` box: content width (368)
     /// minus the card's own horizontal padding (12 × 2).
     static let cardTextWidth: CGFloat = width - 32 - 24
+    /// Shared floor/ceiling for every text box that uses `cardChrome()` — the
+    /// compose input and the translate result's source/target cards. Same
+    /// bounds everywhere so a box's size doesn't jump just because a
+    /// particular state (loading vs. content, compose vs. translated) happened
+    /// to use a different cap — the source card in particular shares an id
+    /// with the compose input, so a mismatch there would visibly resize it.
+    static let textBoxMinHeight: CGFloat = 52
+    static let textBoxMaxHeight: CGFloat = 240
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -925,7 +934,8 @@ struct QuickTranslateView: View {
                     text: isSource ? model.sourceText : model.targetText,
                     height: height,
                     width: QuickTranslateView.cardTextWidth,
-                    maxHeight: 240,
+                    maxHeight: QuickTranslateView.textBoxMaxHeight,
+                    minHeight: QuickTranslateView.textBoxMinHeight,
                     highlights: model.highlights(for: pane),
                     isEditable: editing,
                     onTextChange: { if isSource { model.sourceText = $0 } },
@@ -2097,18 +2107,17 @@ private struct HistoryRow: View {
 }
 
 /// Always-on compose bar atop the history list — typing and hitting Return
-/// translates immediately, no extra click into a separate editor first. Sized
-/// and styled to match the translate pane's own editable input (no box, no
-/// border) rather than looking like a separate search field. Auto-focuses on
-/// appear (history is the empty-selection entry point, so the moment it opens
-/// is exactly when someone wants to start typing).
+/// translates immediately, no extra click into a separate editor first. Same
+/// `cardChrome()` box and the same min/max height as the translate result's
+/// source card (they share a `matchedGeometryEffect` id), so switching
+/// between them doesn't jump size. Auto-focuses on appear (history is the
+/// empty-selection entry point, so the moment it opens is exactly when
+/// someone wants to start typing).
 private struct HistoryComposeInput: View {
     let onSubmit: (String) -> Void
     @State private var text: String = ""
-    @State private var textHeight: CGFloat = HistoryComposeInput.minHeight
+    @State private var textHeight: CGFloat = QuickTranslateView.textBoxMinHeight
 
-    private static let minHeight: CGFloat = 52
-    private static let maxHeight: CGFloat = 140
     /// `SelectableText` needs the exact laid-out width to size itself — same
     /// card padding as `cardChrome()`.
     private static let textWidth: CGFloat = QuickTranslateView.cardTextWidth
@@ -2123,8 +2132,8 @@ private struct HistoryComposeInput: View {
                 text: text,
                 height: $textHeight,
                 width: Self.textWidth,
-                maxHeight: Self.maxHeight,
-                minHeight: Self.minHeight,
+                maxHeight: QuickTranslateView.textBoxMaxHeight,
+                minHeight: QuickTranslateView.textBoxMinHeight,
                 isEditable: true,
                 onTextChange: { text = $0 },
                 onCommit: {
