@@ -384,13 +384,13 @@ struct FloatingBarView: View {
             BarButton(system: "character.bubble", help: "Translate selection", isActive: model.hasSelection) {
                 onTranslate()
             }
-            BarButton(system: "wand.and.stars", help: "Improve copy", isActive: model.hasSelection) {
+            BarButton(system: "sparkles", help: "Improve copy", isActive: model.hasSelection) {
                 onImprove()
             }
             BarButton(system: "speaker.wave.2", help: "Listen", isActive: model.hasSelection) {
                 onListen()
             }
-            BarButton(system: "camera.viewfinder", help: "Capture text") {
+            BarButton(system: "text.viewfinder", help: "Capture text") {
                 // TODO: screenshot + Vision OCR
             }
         }
