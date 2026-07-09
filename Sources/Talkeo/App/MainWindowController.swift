@@ -917,19 +917,13 @@ private struct TranslatePage: View {
     @ViewBuilder
     private var cardArea: some View {
         if model.activeTerm != nil {
+            // Open, Google-dictionary-style content — no container card
+            // (Joaquin's call); full column width keeps it aligned with the
+            // panes' edges.
             ScrollView {
                 ExplainCardPane(model: model)
-                    .padding(.horizontal, 22)
-                    .padding(.vertical, 20)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(Palette.elevated)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(Palette.border, lineWidth: 1)
-                    )
+                    .padding(.top, 8)
                     .padding(.bottom, 16)
             }
         } else if !model.outputText.isEmpty && model.errorMessage == nil {
@@ -1077,10 +1071,8 @@ private struct ExplainCardPane: View {
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            // The card container is elevated; one step back keeps the note
-            // distinct in both appearances.
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Palette.surface)
+                .fill(Palette.elevated)
         )
     }
 
@@ -1117,7 +1109,7 @@ private struct ExplainCardPane: View {
 
     private func shimmerBar(width: CGFloat, height: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: 4, style: .continuous)
-            .fill(Palette.surface)
+            .fill(Palette.elevated)
             .frame(width: width, height: height)
     }
 
