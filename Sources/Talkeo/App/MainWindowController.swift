@@ -1367,7 +1367,10 @@ private struct PlainTextEditor: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let textView = ShortcutTextView()
+        let textView = MarkerTextView()
+        // The app's source pane is a live editor AND picks words — unlike the
+        // popover, where editing means caret-only.
+        textView.allowsPickWhileEditable = true
         textView.isEditable = isEditable
         textView.isSelectable = true
         textView.isRichText = false
@@ -1389,24 +1392,12 @@ private struct PlainTextEditor: NSViewRepresentable {
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.delegate = context.coordinator
 
-        // Word-snapped pick on mouse-up (select-to-explain). Reads the fresh
-        // struct through the coordinator — the closure outlives this render.
+        // Snap-to-word picking (collapse rule included) lives in
+        // MarkerTextView. Reads the fresh struct through the coordinator —
+        // the closure outlives this render.
         let coordinator = context.coordinator
-        textView.onSettled = { [weak textView] in
-            guard let textView, let onWordSelect = coordinator.parent.onWordSelect else { return }
-            let raw = textView.selectedRange()
-            guard raw.length > 0 else { return }
-            let ns = textView.string as NSString
-            let snapped = snapWords(raw, in: ns)
-            guard snapped.length > 0 else { return }
-            onWordSelect(ns.substring(with: snapped), snapped)
-            // Collapse the OS selection in read-only panes so only the marker
-            // shows the pick; editable panes keep it for type-over.
-            if !textView.isEditable {
-                DispatchQueue.main.async { [weak textView] in
-                    textView?.setSelectedRange(NSRange(location: NSMaxRange(snapped), length: 0))
-                }
-            }
+        textView.onWordPick = { term, range in
+            coordinator.parent.onWordSelect?(term, range)
         }
 
         let paragraph = NSMutableParagraphStyle()
@@ -1430,7 +1421,7 @@ private struct PlainTextEditor: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let textView = scroll.documentView as? ShortcutTextView else { return }
+        guard let textView = scroll.documentView as? MarkerTextView else { return }
         context.coordinator.parent = self
         textView.isEditable = isEditable
         if textView.string != text {
@@ -1451,63 +1442,6 @@ private struct PlainTextEditor: NSViewRepresentable {
             guard let textView = notification.object as? NSTextView else { return }
             parent.text = textView.string
             parent.onUserEdit?()
-        }
-    }
-}
-
-/// NSTextView that resolves the standard editing shortcuts itself, so they
-/// work no matter what the main menu offers (the fix feat/ui-options landed
-/// for the popover inputs, applied here too). Also reports settled mouse
-/// selections and draws the picked-term markers (select-to-explain).
-private final class ShortcutTextView: NSTextView {
-    /// Called after a mouse click/drag finishes, with the selection settled.
-    var onSettled: (() -> Void)?
-    /// Picked word ranges to draw (range, isFocused).
-    var markers: [(range: NSRange, active: Bool)] = []
-
-    /// `mouseDown` runs the whole selection drag loop; when it returns the
-    /// selection is final — same pattern as the popover's text view.
-    override func mouseDown(with event: NSEvent) {
-        super.mouseDown(with: event)
-        onSettled?()
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        drawMarkers()
-        super.draw(dirtyRect)
-    }
-
-    /// Rounded marker behind each picked word; the focused one reads stronger.
-    private func drawMarkers() {
-        guard !markers.isEmpty, let lm = layoutManager, let tc = textContainer else { return }
-        let origin = textContainerOrigin
-        for marker in markers {
-            let glyphRange = lm.glyphRange(forCharacterRange: marker.range, actualCharacterRange: nil)
-            lm.enumerateEnclosingRects(
-                forGlyphRange: glyphRange,
-                withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
-                in: tc
-            ) { rect, _ in
-                let frame = rect.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: -3, dy: 0)
-                Palette.marker(active: marker.active).setFill()
-                NSBezierPath(roundedRect: frame, xRadius: 6, yRadius: 6).fill()
-            }
-        }
-    }
-
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard event.type == .keyDown, mods == .command || mods == [.command, .shift] else {
-            return super.performKeyEquivalent(with: event)
-        }
-        switch event.charactersIgnoringModifiers?.lowercased() {
-        case "a" where mods == .command: selectAll(nil); return true
-        case "c" where mods == .command: copy(nil); return true
-        case "v" where mods == .command: paste(nil); return true
-        case "x" where mods == .command: cut(nil); return true
-        case "z" where mods == .command: undoManager?.undo(); return true
-        case "z": undoManager?.redo(); return true
-        default: return super.performKeyEquivalent(with: event)
         }
     }
 }

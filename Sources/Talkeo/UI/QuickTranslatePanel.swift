@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import NaturalLanguage
 import SwiftUI
 
@@ -344,11 +345,17 @@ final class QuickTranslateModel: ObservableObject {
 
     /// Terms the user highlighted to learn, the focused one, and their loaded
     /// cards (keyed by term text). Multiple terms page with ‹ ›, like v1.
-    @Published var terms: [LearnTerm] = []
-    @Published var activeTermIndex: Int? = nil
-    @Published var cards: [String: ExplainCard] = [:]
-    @Published var loadingTerms: Set<String> = []
-    @Published var cardErrors: [String: String] = [:]
+    /// The state machine is the shared `ExplainSession`; the model re-exposes
+    /// it under the original names so the ~28 view call sites stay put, and
+    /// re-emits its changes (nested ObservableObjects don't bubble up).
+    let session: ExplainSession
+    private var sessionChanges: AnyCancellable?
+
+    var terms: [ExplainTerm] { session.terms }
+    var activeTermIndex: Int? { session.activeTermIndex }
+    var cards: [String: ExplainCard] { session.cards }
+    var loadingTerms: Set<String> { session.loadingTerms }
+    var cardErrors: [String: String] { session.cardErrors }
 
     /// Translate view vs. the local history list (shown when Translate is tapped
     /// with nothing selected) vs. the improve view (native rewrite + diff) vs. the
@@ -407,31 +414,16 @@ final class QuickTranslateModel: ObservableObject {
         withAnimation(.easeInOut(duration: 0.22)) { focusedPane = pane }
     }
 
-    /// A highlighted term plus the context the explain endpoint needs (the
-    /// sentence and explain direction) and where it sits, so the text can draw a
-    /// persistent marker over it.
-    struct LearnTerm {
-        let text: String
-        let sentence: String
-        let sourceLang: String
-        let targetLang: String
-        let pane: Pane
-        let range: NSRange
-    }
+    /// The views name `QuickTranslateModel.Pane`; the shared enum keeps that
+    /// spelling working.
+    typealias Pane = ExplainPane
 
-    enum Pane: Equatable { case source, target }
-
-    var activeTerm: LearnTerm? {
-        guard let i = activeTermIndex, terms.indices.contains(i) else { return nil }
-        return terms[i]
-    }
+    var activeTerm: ExplainTerm? { session.activeTerm }
 
     /// Marker ranges (and which is focused) for a pane, so its text view can
     /// highlight the selected words.
     func highlights(for pane: Pane) -> [(range: NSRange, active: Bool)] {
-        terms.enumerated().compactMap { idx, term in
-            term.pane == pane ? (term.range, idx == activeTermIndex) : nil
-        }
+        session.highlights(for: pane)
     }
 
     /// The language shown in a pane: the detected one on top, the translation
@@ -475,11 +467,15 @@ final class QuickTranslateModel: ObservableObject {
     private let client: TransformClient
     private let history: HistoryStore
     private var task: Task<Void, Never>?
-    private var explainTasks: [String: Task<Void, Never>] = [:]
 
     init(client: TransformClient = TalkeoTransformClient(), history: HistoryStore = LocalHistoryStore.shared) {
         self.client = client
         self.history = history
+        // Card arrival animates exactly as it used to when the load lived here.
+        self.session = ExplainSession(client: client, cardAnimation: .easeOut(duration: 0.2))
+        sessionChanges = session.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
     }
 
     func translate(_ text: String) {
@@ -546,34 +542,24 @@ final class QuickTranslateModel: ObservableObject {
     }
 
     /// The user selected a word/phrase: mark it, focus it, and jump the playhead
-    /// to it in the buffered clip (instant — no extra synthesis). No explanations.
+    /// to it in the buffered clip (instant — no extra synthesis). No explanations
+    /// — the session just marks (`loadCard: false`).
     func pickListen(term: String, range: NSRange) {
-        let clean = term.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
-        let item = LearnTerm(text: clean, sentence: sourceText, sourceLang: detectedLang, targetLang: detectedLang, pane: .source, range: range)
-        if let i = terms.firstIndex(where: { $0.pane == .source && NSEqualRanges($0.range, range) }) {
-            activeTermIndex = i
-        } else {
-            terms.removeAll { $0.pane == .source && NSIntersectionRange($0.range, range).length > 0 }
-            terms.append(item)
-            activeTermIndex = terms.count - 1
-        }
+        let item = ExplainTerm(text: term, sentence: sourceText, sourceLang: detectedLang, targetLang: detectedLang, pane: .source, range: range)
+        session.pick(item, loadCard: false)
+        guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         seekToWord(range)
     }
 
     /// Page between selected words and jump the playhead to each.
     func stepListen(by delta: Int) {
-        guard !terms.isEmpty else { return }
-        let current = activeTermIndex ?? 0
-        activeTermIndex = (current + delta + terms.count) % terms.count
+        session.step(by: delta, loadCard: false)
         if let term = activeTerm { seekToWord(term.range) }
     }
 
     /// Drop the focused selected word, focusing a neighbour.
     func removeActiveListen() {
-        guard let i = activeTermIndex, terms.indices.contains(i) else { return }
-        terms.remove(at: i)
-        activeTermIndex = terms.isEmpty ? nil : min(i, terms.count - 1)
+        session.removeActive()
     }
 
     /// Jump the buffered clip to where `range` starts in the text. Loads the clip
@@ -813,104 +799,57 @@ final class QuickTranslateModel: ObservableObject {
     /// an English word (original) is explained in Spanish; a Spanish word
     /// (translation) is explained in English.
     func explain(term: String, pane: Pane, range: NSRange) {
-        let clean = term.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
+        // Early out on empty picks, before any focus change.
+        guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         // The card always teaches English. An English term is explained in
         // Spanish; a Spanish term is explained in English (how to say it in
         // English), per the same shape. Direction follows the term's language.
         let termLang = language(for: pane)
-        let src = termLang
-        let tgt = termLang == "EN" ? "ES" : "EN"
-        let sentence = pane == .source ? sourceText : targetText
-        let item = LearnTerm(text: clean, sentence: sentence, sourceLang: src, targetLang: tgt, pane: pane, range: range)
+        let item = ExplainTerm(
+            text: term,
+            sentence: pane == .source ? sourceText : targetText,
+            sourceLang: termLang,
+            targetLang: termLang == "EN" ? "ES" : "EN",
+            pane: pane,
+            range: range
+        )
         // Animated: opening the card collapses the other pane to its header
-        // and slides the card section in below.
+        // and slides the card section in below. The load kickoff stays outside
+        // the animation, as it always did.
         withAnimation(.easeInOut(duration: 0.22)) {
-            // Re-selecting the exact same span just focuses it.
-            if let i = terms.firstIndex(where: { $0.pane == pane && NSEqualRanges($0.range, range) }) {
-                activeTermIndex = i
-            } else {
-                // No stacking: a new span replaces any markers it overlaps in this pane.
-                terms.removeAll { $0.pane == pane && NSIntersectionRange($0.range, range).length > 0 }
-                terms.append(item)
-                activeTermIndex = terms.count - 1
-            }
+            session.pick(item, loadCard: false)
             focusedPane = pane
         }
-        loadCardIfNeeded(item)
+        if let focused = activeTerm { session.loadCardIfNeeded(for: focused) }
     }
 
     /// Move focus between the selected terms (follows the term's pane).
     func stepTerm(by delta: Int) {
         guard !terms.isEmpty else { return }
-        let current = activeTermIndex ?? 0
-        let next = (current + delta + terms.count) % terms.count
         withAnimation(.easeInOut(duration: 0.22)) {
-            activeTermIndex = next
-            focusedPane = terms[next].pane
+            session.step(by: delta, loadCard: false)
+            focusedPane = activeTerm?.pane
         }
-        loadCardIfNeeded(terms[next])
+        if let focused = activeTerm { session.loadCardIfNeeded(for: focused) }
     }
 
     /// Remove the focused term (and its card), focusing a neighbour.
     func removeActiveTerm() {
-        guard let i = activeTermIndex, terms.indices.contains(i) else { return }
-        let key = terms[i].text
-        explainTasks[key]?.cancel(); explainTasks[key] = nil
+        guard activeTerm != nil else { return }
         // Animated: closing the last card gives the panes their space back.
         withAnimation(.easeInOut(duration: 0.22)) {
-            cards[key] = nil
-            loadingTerms.remove(key)
-            cardErrors[key] = nil
-            terms.remove(at: i)
-            activeTermIndex = terms.isEmpty ? nil : min(i, terms.count - 1)
+            session.removeActive()
             focusedPane = activeTerm?.pane
         }
     }
 
     func retryActiveCard() {
-        guard let item = activeTerm else { return }
-        cards[item.text] = nil
-        cardErrors[item.text] = nil
-        loadCardIfNeeded(item)
-    }
-
-    private func loadCardIfNeeded(_ item: LearnTerm) {
-        let key = item.text
-        guard cards[key] == nil, !loadingTerms.contains(key) else { return }
-        cardErrors[key] = nil
-        loadingTerms.insert(key)
-        explainTasks[key] = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let card = try await self.client.explainCard(
-                    term: item.text,
-                    sentence: item.sentence,
-                    sourceLang: item.sourceLang,
-                    targetLang: item.targetLang
-                )
-                guard !Task.isCancelled else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
-                    self.cards[key] = card
-                    self.loadingTerms.remove(key)
-                }
-            } catch {
-                guard !Task.isCancelled else { return }
-                self.loadingTerms.remove(key)
-                self.cardErrors[key] = QuickTranslateModel.message(error)
-            }
-        }
+        session.retryActiveCard()
     }
 
     func clearSelection() {
-        explainTasks.values.forEach { $0.cancel() }
-        explainTasks = [:]
-        terms = []
-        activeTermIndex = nil
-        cards = [:]
-        loadingTerms = []
-        cardErrors = [:]
+        session.clear()
         focusedPane = nil
     }
 }
@@ -2060,7 +1999,9 @@ private struct SelectableText: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let textView = WordSelectingTextView()
+        let textView = MarkerTextView()
+        // Non-activating panel: selections must register on the first click.
+        textView.acceptsFirstMouseEnabled = true
         textView.isSelectable = true
         textView.drawsBackground = false
         textView.isRichText = false
@@ -2086,20 +2027,13 @@ private struct SelectableText: NSViewRepresentable {
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.delegate = context.coordinator
 
+        // Snap-to-word picking and the collapse-after-pick rule live in
+        // MarkerTextView; the default (no picking while editable) is exactly
+        // this popover's behavior. Reads the coordinator at call time so the
+        // closure survives re-renders.
         let coordinator = context.coordinator
-        textView.onSettled = { [weak textView] in
-            // No marking while editing — clicks just place the caret.
-            guard let textView, !textView.isEditable else { return }
-            let raw = textView.selectedRange()
-            guard raw.length > 0 else { return }
-            let ns = textView.string as NSString
-            let snapped = snapWords(raw, in: ns)
-            guard snapped.length > 0 else { return }
-            coordinator.onSelect(ns.substring(with: snapped), snapped)
-            // Collapse the OS selection so only our marker shows the pick.
-            DispatchQueue.main.async { [weak textView] in
-                textView?.setSelectedRange(NSRange(location: NSMaxRange(snapped), length: 0))
-            }
+        textView.onWordPick = { term, range in
+            coordinator.onSelect(term, range)
         }
 
         let scroll = NSScrollView()
@@ -2114,7 +2048,7 @@ private struct SelectableText: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let textView = scroll.documentView as? WordSelectingTextView else { return }
+        guard let textView = scroll.documentView as? MarkerTextView else { return }
         let coordinator = context.coordinator
         coordinator.onSelect = onSelect
         coordinator.onTextChange = onTextChange
@@ -2212,92 +2146,6 @@ private struct SelectableText: NSViewRepresentable {
     }
 }
 
-/// NSTextView that runs its selection tracking inside `mouseDown`, then reports
-/// the settled selection, and draws rounded markers behind the picked words.
-private final class WordSelectingTextView: NSTextView {
-    var onSettled: (() -> Void)?
-    /// Picked word ranges to draw (range, isFocused).
-    var markers: [(range: NSRange, active: Bool)] = []
-    /// Optional override fill for the markers (Improve's diff tint).
-    var markerColor: NSColor?
-    /// Word currently being spoken (Listen) — drawn in accent, karaoke-style.
-    var spokenMarker: NSRange?
-
-    /// Register a selection on the first click even when the panel isn't key.
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-    /// This app is a menu-bar accessory with no app-wide Edit menu (nothing
-    /// establishes Cmd+A/C/V/X as key equivalents), so the standard editing
-    /// shortcuts never reach us through the usual menu route — handle them
-    /// directly instead of depending on one.
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-              let key = event.charactersIgnoringModifiers?.lowercased() else {
-            return super.performKeyEquivalent(with: event)
-        }
-        switch key {
-        case "a": selectAll(nil)
-        case "c": copy(nil)
-        case "v": paste(nil)
-        case "x": cut(nil)
-        default: return super.performKeyEquivalent(with: event)
-        }
-        return true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        drawMarkers()
-        drawSpokenMarker()
-        super.draw(dirtyRect)
-    }
-
-    private func drawMarkers() {
-        guard !markers.isEmpty, let lm = layoutManager, let tc = textContainer else { return }
-        let origin = textContainerOrigin
-        for marker in markers {
-            let glyphRange = lm.glyphRange(forCharacterRange: marker.range, actualCharacterRange: nil)
-            lm.enumerateEnclosingRects(
-                forGlyphRange: glyphRange,
-                withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
-                in: tc
-            ) { rect, _ in
-                let frame = rect.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: -3, dy: 0)
-                let fill: NSColor
-                if let tint = self.markerColor {
-                    // Diff tint: emphasize the paged fragment, keep the rest visible.
-                    fill = marker.active ? tint : tint.withAlphaComponent(tint.alphaComponent * 0.5)
-                } else {
-                    fill = Palette.marker(active: marker.active)
-                }
-                fill.setFill()
-                NSBezierPath(roundedRect: frame, xRadius: 6, yRadius: 6).fill()
-            }
-        }
-    }
-
-    /// The current spoken word, accent-tinted, drawn over the pick markers.
-    private func drawSpokenMarker() {
-        guard let spokenMarker, spokenMarker.length > 0,
-              let lm = layoutManager, let tc = textContainer else { return }
-        let origin = textContainerOrigin
-        let glyphRange = lm.glyphRange(forCharacterRange: spokenMarker, actualCharacterRange: nil)
-        lm.enumerateEnclosingRects(
-            forGlyphRange: glyphRange,
-            withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
-            in: tc
-        ) { rect, _ in
-            let frame = rect.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: -3, dy: 0)
-            NSColor.controlAccentColor.withAlphaComponent(0.28).setFill()
-            NSBezierPath(roundedRect: frame, xRadius: 6, yRadius: 6).fill()
-        }
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        super.mouseDown(with: event)
-        onSettled?()
-    }
-}
-
 extension View {
     /// Force the pointing-hand cursor while hovering, reasserting on every move
     /// so a neighbouring text view's I-beam can't linger over the control. These
@@ -2325,29 +2173,6 @@ extension View {
                     .stroke(Palette.border, lineWidth: 1)
             )
     }
-}
-
-/// Grow a raw selection to the whole words it touches; a selection covering no
-/// word characters snaps to nothing. Internal: the main window's translator
-/// reuses it for its own select-to-explain.
-func snapWords(_ range: NSRange, in ns: NSString) -> NSRange {
-    let empty = NSRange(location: range.location, length: 0)
-    guard range.length > 0, range.location >= 0, NSMaxRange(range) <= ns.length else { return empty }
-    let wordSet = CharacterSet.alphanumerics
-    func isWord(_ i: Int) -> Bool {
-        guard i >= 0, i < ns.length, let s = UnicodeScalar(ns.character(at: i)) else { return false }
-        return wordSet.contains(s) || s == "'" || s == "’"
-    }
-    var first = -1, last = -1
-    for i in range.location..<NSMaxRange(range) where isWord(i) {
-        if first == -1 { first = i }
-        last = i
-    }
-    guard first != -1 else { return empty }
-    var start = first, end = last + 1
-    while start > 0, isWord(start - 1) { start -= 1 }
-    while end < ns.length, isWord(end) { end += 1 }
-    return NSRange(location: start, length: end - start)
 }
 
 private struct HistoryRow: View {
