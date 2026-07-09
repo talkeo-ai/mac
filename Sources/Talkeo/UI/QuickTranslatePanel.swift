@@ -113,6 +113,14 @@ final class QuickTranslatePanel {
     }
 
     func show(text: String) {
+        // Toggle: re-tapping Translate for the text already on screen means
+        // "close it", not "present it again". A different selection still
+        // switches the content instead of dismissing.
+        if panel.isVisible, model.mode == .translate,
+           model.sourceText == text.trimmingCharacters(in: .whitespacesAndNewlines) {
+            hide()
+            return
+        }
         model.translate(text)
         // A single word goes straight to its explain card (the translation still
         // streams in the background, so removing the card falls back to it).
@@ -137,7 +145,13 @@ final class QuickTranslatePanel {
     }
 
     /// Translate tapped with nothing selected — show the local history list.
+    /// A bare tap while the popover is already open (whatever it shows) reads
+    /// as "close it", so it toggles off instead of switching to history.
     func showHistory() {
+        if panel.isVisible {
+            hide()
+            return
+        }
         model.showHistory()
         present()
     }
@@ -1205,9 +1219,12 @@ struct QuickTranslateView: View {
             if model.activeTerm != nil {
                 Divider().overlay(Palette.border).opacity(0.6)
                 explainSection
-            } else if model.phase == .done {
+            } else if model.phase == .streaming || model.phase == .done {
                 // Make the select-to-explain feature discoverable — nothing
-                // else hints that the text is interactive.
+                // else hints that the text is interactive. Present from the
+                // skeleton on (not just .done), so the row's height is part of
+                // the loading layout and the popover doesn't jump when the
+                // translation lands.
                 selectHint
             }
         }
