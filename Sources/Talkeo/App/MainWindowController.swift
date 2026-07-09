@@ -21,9 +21,8 @@ final class MainWindowController: NSObject {
         self.window = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        // AppKit hands initial key focus to the first toolbar control — the
-        // sidebar toggle — which draws a focus ring on it. Clear it back to
-        // the window; async because SwiftUI assigns focus after key.
+        // Don't let AppKit hand initial key focus to a control (it draws a
+        // focus ring); async because SwiftUI assigns focus after key.
         DispatchQueue.main.async { [weak window] in
             window?.makeFirstResponder(nil)
         }
@@ -37,12 +36,13 @@ final class MainWindowController: NSObject {
             defer: false
         )
         window.title = "Talkeo"
-        // The sidebar carries the app's identity, so the chrome stays minimal.
+        // The SPA draws its own chrome (custom sidebar, full-bleed content);
+        // the titlebar is just the traffic lights floating over it.
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 760, height: 500)
-        window.backgroundColor = Palette.nsDynamic(0xFFFFFF, 0x1C1C1C)
+        window.minSize = NSSize(width: 900, height: 560)
+        window.backgroundColor = Palette.nsDynamic(0xF7F7F8, 0x161616)
         window.contentViewController = NSHostingController(rootView: MainWindowView())
         // Open filling the screen (minus menu bar / Dock), like a full-size SPA.
         if let screen = NSScreen.main ?? NSScreen.screens.first {
@@ -105,6 +105,10 @@ final class MainWindowController: NSObject {
 /// Sections of the main window's left-hand menu. The first four mirror the
 /// floating bar's actions; the last two are the user-facing record (transcript
 /// of past translations, estimated English level).
+///
+/// Each section owns a solid accent color (Duolingo-style colorful menu): the
+/// icon always sits on its colored tile, and the selected row picks the color
+/// up in its background/label.
 enum MainSection: String, CaseIterable, Identifiable {
     case translate, improve, listen, capture, transcript, englishLevel
 
@@ -123,12 +127,23 @@ enum MainSection: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .translate: return "character.bubble"
+        case .translate: return "character.bubble.fill"
         case .improve: return "wand.and.stars"
-        case .listen: return "speaker.wave.2"
+        case .listen: return "speaker.wave.2.fill"
         case .capture: return "camera.viewfinder"
-        case .transcript: return "list.bullet.rectangle"
-        case .englishLevel: return "chart.bar"
+        case .transcript: return "list.bullet.rectangle.fill"
+        case .englishLevel: return "chart.bar.fill"
+        }
+    }
+
+    var accent: Color {
+        switch self {
+        case .translate: return Palette.dynamic(0x1C7CF2, 0x3F97FF)   // blue
+        case .improve: return Palette.dynamic(0x8B5CF6, 0xA78BFA)     // violet
+        case .listen: return Palette.dynamic(0x16A34A, 0x34C97A)      // green
+        case .capture: return Palette.dynamic(0xF97316, 0xFF9040)     // orange
+        case .transcript: return Palette.dynamic(0x0D9DA8, 0x2BC4CF)  // teal
+        case .englishLevel: return Palette.dynamic(0xE0A800, 0xF5C518) // gold
         }
     }
 
@@ -136,37 +151,76 @@ enum MainSection: String, CaseIterable, Identifiable {
     static let progress: [MainSection] = [.transcript, .englishLevel]
 }
 
-// MARK: - Root view (SPA: sidebar + detail)
+// MARK: - Root view (SPA: custom solid sidebar + detail)
 
 struct MainWindowView: View {
-    @State private var selection: MainSection? = .translate
+    @State private var selection: MainSection = .translate
+
+    /// Sidebar surface, one step darker than the content like the reference
+    /// SPAs (solid, no vibrancy material).
+    private static let sidebarBackground = Palette.dynamic(0xF7F7F8, 0x161616)
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $selection) {
-                Section("Tools") {
-                    ForEach(MainSection.tools) { item in
-                        Label(item.title, systemImage: item.icon).tag(item)
-                    }
-                }
-                Section("Your English") {
-                    ForEach(MainSection.progress) { item in
-                        Label(item.title, systemImage: item.icon).tag(item)
-                    }
-                }
-            }
-            .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 280)
-        } detail: {
+        HStack(spacing: 0) {
+            sidebar
+            Divider().overlay(Palette.border)
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Palette.surface)
         }
+        // Full-bleed SPA: the sidebar owns the titlebar strip too; the brand
+        // header's top padding keeps it clear of the traffic lights.
+        .ignoresSafeArea()
+    }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            brand
+                .padding(.horizontal, 12)
+                .padding(.top, 44)
+                .padding(.bottom, 24)
+
+            sectionLabel("Tools")
+            ForEach(MainSection.tools) { item in
+                SidebarRow(item: item, isSelected: selection == item) { selection = item }
+            }
+
+            sectionLabel("Your English")
+                .padding(.top, 20)
+            ForEach(MainSection.progress) { item in
+                SidebarRow(item: item, isSelected: selection == item) { selection = item }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .frame(width: 248)
+        .frame(maxHeight: .infinity)
+        .background(Self.sidebarBackground)
+    }
+
+    private var brand: some View {
+        HStack(spacing: 10) {
+            BrandMark(cornerRadius: 8)
+                .frame(width: 30, height: 30)
+            Text("talkeo")
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(Palette.foreground)
+        }
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.system(size: 11, weight: .bold))
+            .kerning(1.1)
+            .foregroundStyle(Palette.tertiary)
+            .padding(.horizontal, 12)
+            .padding(.bottom, 6)
     }
 
     @ViewBuilder
     private var detail: some View {
-        switch selection ?? .translate {
+        switch selection {
         case .translate:
             ToolPage(
                 section: .translate,
@@ -212,6 +266,50 @@ struct MainWindowView: View {
     }
 }
 
+/// One entry of the sidebar menu: colored icon tile + bold label, with a solid
+/// selected state (tinted fill + accent border) and a quiet hover.
+private struct SidebarRow: View {
+    let item: MainSection
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHover = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(item.accent)
+                    Image(systemName: item.icon)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 30, height: 30)
+
+                Text(item.title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(isSelected ? item.accent : Palette.muted)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isSelected ? item.accent.opacity(0.13) : (isHover ? Palette.elevated : Color.clear))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(isSelected ? item.accent.opacity(0.5) : Color.clear, lineWidth: 1.5)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHover = $0 }
+        .animation(.easeOut(duration: 0.12), value: isHover)
+    }
+}
+
 // MARK: - Tool pages
 
 /// Detail page for one of the floating-bar tools. Today these document the
@@ -224,36 +322,43 @@ private struct ToolPage: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                PageHeader(icon: section.icon, title: section.title, subtitle: summary)
+            VStack(alignment: .leading, spacing: 28) {
+                PageHeader(section: section, subtitle: summary)
 
                 if comingSoon {
                     Text("Coming soon")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Palette.muted)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(Capsule().fill(Palette.elevated))
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(section.accent))
                 } else {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 10) {
                         ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
-                            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            HStack(alignment: .center, spacing: 14) {
                                 Text("\(index + 1)")
-                                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(Palette.muted)
-                                    .frame(width: 20, height: 20)
-                                    .background(Circle().fill(Palette.elevated))
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 26, height: 26)
+                                    .background(Circle().fill(section.accent))
                                 Text(step)
-                                    .font(.system(size: 13))
+                                    .font(.system(size: 14))
                                     .foregroundStyle(Palette.foreground)
+                                Spacer(minLength: 0)
                             }
+                            .padding(16)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Palette.elevated)
+                            )
                         }
                     }
                 }
             }
-            .frame(maxWidth: 620, alignment: .leading)
-            .padding(.horizontal, 48)
-            .padding(.vertical, 40)
+            .frame(maxWidth: 680, alignment: .leading)
+            .padding(.horizontal, 56)
+            .padding(.top, 64)
+            .padding(.bottom, 48)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -267,37 +372,39 @@ private struct TranscriptPage: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 28) {
                 PageHeader(
-                    icon: MainSection.transcript.icon,
-                    title: MainSection.transcript.title,
+                    section: .transcript,
                     subtitle: "Everything you've translated with Talkeo."
                 )
 
                 if entries.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 8) {
                         Text("Nothing here yet")
-                            .font(.system(size: 14, weight: .medium))
+                            .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(Palette.foreground)
                         Text("Translations you make from the floating bar will show up here.")
-                            .font(.system(size: 13))
+                            .font(.system(size: 14))
                             .foregroundStyle(Palette.muted)
                     }
-                    .padding(.top, 8)
+                    .padding(20)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Palette.elevated)
+                    )
                 } else {
-                    VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 10) {
                         ForEach(entries) { entry in
                             TranscriptRow(entry: entry)
-                            if entry.id != entries.last?.id {
-                                Divider().overlay(Palette.border)
-                            }
                         }
                     }
                 }
             }
-            .frame(maxWidth: 720, alignment: .leading)
-            .padding(.horizontal, 48)
-            .padding(.vertical, 40)
+            .frame(maxWidth: 760, alignment: .leading)
+            .padding(.horizontal, 56)
+            .padding(.top, 64)
+            .padding(.bottom, 48)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onAppear { entries = LocalHistoryStore.shared.all() }
@@ -308,28 +415,34 @@ private struct TranscriptRow: View {
     let entry: HistoryEntry
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 7) {
             Text(entry.source)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Palette.foreground)
                 .lineLimit(2)
             Text(entry.target)
-                .font(.system(size: 13))
+                .font(.system(size: 14))
                 .foregroundStyle(Palette.muted)
                 .lineLimit(2)
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 Text("\(entry.detectedLang.uppercased()) → \(entry.translateLang.uppercased())")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Palette.muted)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(RoundedRectangle(cornerRadius: 4).fill(Palette.elevated))
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(MainSection.transcript.accent))
                 Text(entry.timestamp.formatted(date: .abbreviated, time: .shortened))
-                    .font(.system(size: 11))
+                    .font(.system(size: 12))
                     .foregroundStyle(Palette.tertiary)
             }
+            .padding(.top, 2)
         }
-        .padding(.vertical, 12)
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Palette.elevated)
+        )
     }
 }
 
@@ -343,32 +456,35 @@ private struct EnglishLevelPage: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 28) {
                 PageHeader(
-                    icon: MainSection.englishLevel.icon,
-                    title: MainSection.englishLevel.title,
+                    section: .englishLevel,
                     subtitle: "Talkeo estimates your level from how you actually use English."
                 )
 
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     ForEach(Self.levels, id: \.self) { level in
                         Text(level)
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: 15, weight: .bold))
                             .foregroundStyle(Palette.tertiary)
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(Palette.elevated))
+                            .padding(.vertical, 16)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(Palette.elevated)
+                            )
                     }
                 }
-                .frame(maxWidth: 480)
+                .frame(maxWidth: 560)
 
                 Text("Not enough data yet. Keep translating, improving and listening — your estimated level will appear here.")
-                    .font(.system(size: 13))
+                    .font(.system(size: 14))
                     .foregroundStyle(Palette.muted)
             }
-            .frame(maxWidth: 620, alignment: .leading)
-            .padding(.horizontal, 48)
-            .padding(.vertical, 40)
+            .frame(maxWidth: 680, alignment: .leading)
+            .padding(.horizontal, 56)
+            .padding(.top, 64)
+            .padding(.bottom, 48)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -377,27 +493,54 @@ private struct EnglishLevelPage: View {
 // MARK: - Shared page chrome
 
 private struct PageHeader: View {
-    let icon: String
-    let title: String
+    let section: MainSection
     let subtitle: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(Palette.foreground)
-                .frame(width: 44, height: 44)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Palette.elevated)
-                )
-            Text(title)
-                .font(.system(size: 22, weight: .semibold))
+        VStack(alignment: .leading, spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(section.accent)
+                Image(systemName: section.icon)
+                    .font(.system(size: 25, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 56, height: 56)
+
+            Text(section.title)
+                .font(.system(size: 28, weight: .bold))
                 .foregroundStyle(Palette.foreground)
             Text(subtitle)
-                .font(.system(size: 13))
+                .font(.system(size: 15))
                 .foregroundStyle(Palette.muted)
         }
+    }
+}
+
+/// Bundle brand icon with a symbol fallback, mirroring the status bar and
+/// floating bar treatment.
+private struct BrandMark: View {
+    var cornerRadius: CGFloat = 8
+
+    var body: some View {
+        Group {
+            if let url = Bundle.main.url(forResource: "icon", withExtension: "png"),
+               let nsImage = NSImage(contentsOf: url) {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFill()
+            } else {
+                Image(systemName: "text.viewfinder")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Palette.foreground)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(Palette.border, lineWidth: 1)
+        )
     }
 }
 
