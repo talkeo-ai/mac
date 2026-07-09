@@ -855,7 +855,10 @@ struct QuickTranslateView: View {
     /// state (loading vs. content, compose vs. translated) happened to use a
     /// different cap.
     static let textBoxMinHeight: CGFloat = 52
-    static let textBoxMaxHeight: CGFloat = 240
+    /// ~7 lines; past this the box scrolls internally. Kept modest on purpose:
+    /// with source + translation both capped, the whole popover stays well
+    /// under half the screen even for long pasted text.
+    static let textBoxMaxHeight: CGFloat = 160
     /// How many recent entries show inline under the source card in History.
     /// Older ones live in the main app's History screen, reached via
     /// `fullHistoryLink`.
