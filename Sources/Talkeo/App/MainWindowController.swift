@@ -880,6 +880,8 @@ private struct HistoryPanel: View {
 }
 
 /// One history entry; clicking it loads the pair back into the translator.
+/// Delete lives in a top-right overlay that fades in on hover — out of the
+/// text flow, so it never stretches the header line or shifts the row.
 private struct HistoryRow: View {
     let entry: HistoryEntry
     let select: () -> Void
@@ -889,14 +891,9 @@ private struct HistoryRow: View {
     var body: some View {
         Button(action: select) {
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text("\(QuickTranslateModel.languageName(entry.detectedLang)) → \(QuickTranslateModel.languageName(entry.translateLang))")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Palette.tertiary)
-                    Spacer(minLength: 0)
-                    PaneIconButton(system: "trash", help: "Delete", size: 20) { delete() }
-                        .opacity(isHover ? 1 : 0)
-                }
+                Text("\(QuickTranslateModel.languageName(entry.detectedLang)) → \(QuickTranslateModel.languageName(entry.translateLang))")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Palette.tertiary)
                 Text(entry.source)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Palette.foreground)
@@ -908,6 +905,8 @@ private struct HistoryRow: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
+            // Keep the text clear of the delete corner (26pt trailing total).
+            .padding(.trailing, 14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -916,8 +915,42 @@ private struct HistoryRow: View {
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
+        .overlay(alignment: .topTrailing) {
+            if isHover {
+                RowDeleteButton(action: delete)
+                    .padding(.top, 4)
+                    .padding(.trailing, 5)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: isHover)
         .onHover { isHover = $0 }
         .help(entry.timestamp.formatted(date: .abbreviated, time: .shortened))
+    }
+}
+
+/// The history row's delete affordance: a bare trash glyph on a small rounded
+/// tile (matching the row's corner language — a circle read as a hole in the
+/// hovered card), muted until the pointer reaches it.
+private struct RowDeleteButton: View {
+    let action: () -> Void
+    @State private var isHover = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "trash")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(isHover ? Palette.foreground : Palette.muted)
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isHover ? Palette.surface : Color.clear)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHover = $0 }
+        .help("Delete")
     }
 }
 
