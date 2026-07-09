@@ -740,7 +740,7 @@ private struct TranslatePage: View {
                 sourcePane
                 outputPane
             }
-            .frame(height: 260)
+            .frame(height: 240)
 
             // Selected meanings: pick a word in either pane and it's taught
             // here (the popover's select-to-learn, at home in the app).
@@ -813,18 +813,20 @@ private struct TranslatePage: View {
                 onWordSelect: { term, range in model.pick(term: term, pane: .source, range: range) },
                 markers: model.highlights(for: .source)
             )
-                .padding(.top, 10)
-                .padding(.leading, 10)
-                .padding(.bottom, 10)
+                .padding(.top, 14)
+                .padding(.leading, 14)
+                .padding(.bottom, 14)
                 // Keep typed text clear of the ✕ button in the corner.
-                .padding(.trailing, 36)
+                .padding(.trailing, 40)
 
             if model.sourceText.isEmpty {
+                // Sits exactly where the editor's text starts (padding +
+                // container inset 2 + line fragment padding 5).
                 Text("Type or paste text…")
                     .font(.system(size: 16))
                     .foregroundStyle(Palette.tertiary)
-                    .padding(.top, 12)
-                    .padding(.leading, 17)
+                    .padding(.top, 16)
+                    .padding(.leading, 21)
                     .allowsHitTesting(false)
             }
         }
@@ -833,10 +835,14 @@ private struct TranslatePage: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(Palette.elevated)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Palette.border, lineWidth: 1)
+        )
         .overlay(alignment: .topTrailing) {
             if !model.sourceText.isEmpty {
                 PaneIconButton(system: "xmark", help: "Clear") { model.clear() }
-                    .padding(8)
+                    .padding(10)
             }
         }
     }
@@ -856,17 +862,21 @@ private struct TranslatePage: View {
                         .padding(.vertical, 6)
                         .background(Capsule().stroke(Palette.border, lineWidth: 1))
                 }
-                .padding(17)
+                .padding(.top, 16)
+                .padding(.horizontal, 21)
             } else if model.outputText.isEmpty {
                 if model.isStreaming {
                     ProgressView()
                         .controlSize(.small)
-                        .padding(17)
+                        .padding(.top, 18)
+                        .padding(.leading, 21)
                 } else {
+                    // Mirrors the source placeholder's exact text position.
                     Text("Translation")
                         .font(.system(size: 16))
                         .foregroundStyle(Palette.tertiary)
-                        .padding(17)
+                        .padding(.top, 16)
+                        .padding(.leading, 21)
                 }
             } else {
                 // Read-only native text view: real selection/copy behavior.
@@ -876,11 +886,11 @@ private struct TranslatePage: View {
                     onWordSelect: { term, range in model.pick(term: term, pane: .output, range: range) },
                     markers: model.highlights(for: .output)
                 )
-                    .padding(.top, 10)
-                    .padding(.leading, 10)
-                    .padding(.trailing, 10)
+                    .padding(.top, 14)
+                    .padding(.leading, 14)
+                    .padding(.trailing, 14)
                     // Keep the last line clear of the copy button.
-                    .padding(.bottom, 32)
+                    .padding(.bottom, 36)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -888,27 +898,49 @@ private struct TranslatePage: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(Palette.elevated)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Palette.border, lineWidth: 1)
+        )
         .overlay(alignment: .bottomTrailing) {
             if !model.outputText.isEmpty && !model.isStreaming {
                 CopyButton(text: model.outputText)
-                    .padding(8)
+                    .padding(10)
             }
         }
     }
 
     /// The learning area under the panes: the focused picked term's card
-    /// (shimmer while it loads, retry on failure), or empty space when nothing
-    /// is picked.
+    /// (shimmer while it loads, retry on failure) in a container matching the
+    /// panes' chrome, or — once there's a translation — a quiet hint that
+    /// words can be picked (the popover's copy).
     @ViewBuilder
     private var cardArea: some View {
         if model.activeTerm != nil {
             ScrollView {
                 ExplainCardPane(model: model)
-                    .frame(maxWidth: 680, alignment: .leading)
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 20)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Palette.elevated)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Palette.border, lineWidth: 1)
+                    )
                     .padding(.bottom, 16)
             }
+        } else if !model.outputText.isEmpty && model.errorMessage == nil {
+            // Kept visible during streaming too, so it never pops in late
+            // (same lesson the popover's skeleton hint learned).
+            Text("Select any word or phrase to see its meaning")
+                .font(.system(size: 13))
+                .foregroundStyle(Palette.tertiary)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 2)
+            Spacer(minLength: 0)
         } else {
             Spacer(minLength: 0)
         }
@@ -1043,8 +1075,10 @@ private struct ExplainCardPane: View {
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
+            // The card container is elevated; one step back keeps the note
+            // distinct in both appearances.
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Palette.elevated)
+                .fill(Palette.surface)
         )
     }
 
@@ -1081,7 +1115,7 @@ private struct ExplainCardPane: View {
 
     private func shimmerBar(width: CGFloat, height: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: 4, style: .continuous)
-            .fill(Palette.elevated)
+            .fill(Palette.surface)
             .frame(width: width, height: height)
     }
 
