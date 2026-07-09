@@ -11,8 +11,13 @@ import SwiftUI
 /// card below** (meaning, examples, a typed insight). It dismisses on a click
 /// anywhere outside it.
 ///
-/// The panel stays non-activating (it never steals focus when it appears) but
-/// can become key, so clicking into it to select text works.
+/// Presenting activates the app and makes this panel key: opening an option
+/// means the user wants to use it, and only an *active* app gets AppKit's
+/// normal cursor/hover/typing behavior inside its windows (an inactive one
+/// would need the same background-window workarounds as the floating bar).
+/// Activation is quiet — the app is an accessory, so no menu bar or Dock
+/// swap. The app that had focus is captured first: Improve's Replace writes
+/// back into it, and closing the popover hands focus back to it.
 final class QuickPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
@@ -37,6 +42,11 @@ final class QuickTranslatePanel {
     /// leaves, whatever the path (dismiss click, close button, Replace). The
     /// owner uses it to hold the floating bar revealed while we're open.
     var onVisibilityChange: ((Bool) -> Void)?
+
+    /// The app that had focus when the popover opened. Presenting activates
+    /// us, so by Replace/close time querying frontmost would return Talkeo —
+    /// this is who Improve writes back into and who gets focus back after.
+    private var previousApp: NSRunningApplication?
 
     private static let width: CGFloat = 400
     private static let nominalHeight: CGFloat = 170
@@ -118,13 +128,13 @@ final class QuickTranslatePanel {
         present()
     }
 
-    /// Apply the improved text in place. Capture the target app *before* closing
-    /// (our non-activating panel left it frontmost), order the panel out instantly
-    /// so it resigns key with no fade delay, then let the replacer do its thing
-    /// (AX write first, clipboard + ⌘V fallback).
+    /// Apply the improved text in place. The popover holds focus while open,
+    /// so the write-back target is the app captured at present time. Order the
+    /// panel out instantly so it resigns key with no fade delay, then let the
+    /// replacer do its thing (AX write first, clipboard + ⌘V fallback).
     private func performReplace(_ text: String) {
         guard !text.isEmpty else { return }
-        let target = NSWorkspace.shared.frontmostApplication
+        let target = previousApp ?? NSWorkspace.shared.frontmostApplication
         // Terminals: the selection is copy-only and decoupled from the editable
         // input, and AX exposes the whole scrollback (not a logical input line), so
         // there's no sound way to edit the selection in place — especially in TUIs
@@ -132,6 +142,7 @@ final class QuickTranslatePanel {
         if SelectionReplacer.isTerminal(target) {
             replacer.copyToClipboard(text)
             closeImmediately()
+            target?.activate() // hand focus back for the deliberate paste
             return
         }
         closeImmediately()
@@ -150,6 +161,11 @@ final class QuickTranslatePanel {
     }
 
     private func present() {
+        // Capture who has focus before we take it — only on the transition, so
+        // re-presenting while already active can't overwrite it with ourselves.
+        if !NSApp.isActive {
+            previousApp = NSWorkspace.shared.frontmostApplication
+        }
         computeAnchor()
         let origin = NSPoint(x: leftAnchor, y: topAnchor - Self.nominalHeight)
         panel.setFrame(NSRect(origin: origin, size: NSSize(width: Self.width, height: Self.nominalHeight)), display: true)
@@ -161,6 +177,8 @@ final class QuickTranslatePanel {
                 panel.animator().alphaValue = 1
             }
         }
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKey()
         installDismissMonitor()
         onVisibilityChange?(true)
     }
@@ -180,6 +198,19 @@ final class QuickTranslatePanel {
         // Release the bar as soon as the fade starts — visually the popover is
         // already going away, so the bar may retract with it.
         onVisibilityChange?(false)
+        restoreFocus()
+    }
+
+    /// Hand focus back to the app the popover took it from — but only if we
+    /// still hold it. Deferred a beat: when the dismissal was a click on
+    /// another app, that click's own activation may still be in flight, and
+    /// re-activating the previous app here would steal focus from where the
+    /// user just put it.
+    private func restoreFocus() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self, NSApp.isActive else { return }
+            self.previousApp?.activate()
+        }
     }
 
     /// Pin the top-left so the popover grows downward from a fixed point, tucked
