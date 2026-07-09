@@ -33,6 +33,12 @@ final class QuickTranslatePanel {
     private var topAnchor: CGFloat = 0
     private var leftAnchor: CGFloat = 0
 
+    /// "Full history" tapped in the Translate/History view. Mirrors
+    /// `FloatingBarPanel.onOpenApp` — this panel doesn't know the main app
+    /// window exists; whoever owns both (`AppDelegate`) wires this to it once
+    /// that window can open to a specific section.
+    var onOpenFullHistory: (() -> Void)?
+
     private static let width: CGFloat = 400
     private static let nominalHeight: CGFloat = 170
     private static let maxHeight: CGFloat = 600
@@ -67,11 +73,13 @@ final class QuickTranslatePanel {
         var onResizeRef: ((CGSize) -> Void)?
         var onCloseRef: (() -> Void)?
         var onReplaceRef: ((String) -> Void)?
+        var onOpenFullHistoryRef: (() -> Void)?
         let view = QuickTranslateView(
             model: model,
             onResize: { onResizeRef?($0) },
             onClose: { onCloseRef?() },
-            onReplace: { onReplaceRef?($0) }
+            onReplace: { onReplaceRef?($0) },
+            onOpenFullHistory: { onOpenFullHistoryRef?() }
         )
         let hosting = FirstMouseHostingView(rootView: view)
         hosting.frame = NSRect(origin: .zero, size: NSSize(width: Self.width, height: Self.nominalHeight))
@@ -81,6 +89,7 @@ final class QuickTranslatePanel {
         onResizeRef = { [weak self] size in self?.resize(to: size) }
         onCloseRef = { [weak self] in self?.hide() }
         onReplaceRef = { [weak self] text in self?.performReplace(text) }
+        onOpenFullHistoryRef = { [weak self] in self?.onOpenFullHistory?() }
     }
 
     func show(text: String) {
@@ -778,6 +787,8 @@ struct QuickTranslateView: View {
     let onClose: () -> Void
     /// Apply the improved text in place (Improve's Replace action).
     var onReplace: (String) -> Void = { _ in }
+    /// "Full history" tapped — open the main app's History/Transcript screen.
+    var onOpenFullHistory: () -> Void = {}
     @State private var sourceHeight: CGFloat = 22
     @State private var targetHeight: CGFloat = 22
     /// Measured natural height of the improve correction card, so it scrolls
@@ -1031,14 +1042,13 @@ struct QuickTranslateView: View {
     }
 
     /// Jumps to the full history in the main app — the popover only ever shows
-    /// the last few. The dedicated History screen isn't built yet (it's a later
-    /// ROADMAP.md item), so this is a stub for that wiring.
+    /// the last few. `onOpenFullHistory` is a no-op until `AppDelegate` wires it
+    /// to the main window (that window, and the ability to open it to a
+    /// specific section, don't exist on this branch yet).
     private var fullHistoryLink: some View {
         HStack {
             Spacer()
-            Button(action: {
-                // TODO: open the main app's History screen once it ships.
-            }) {
+            Button(action: onOpenFullHistory) {
                 HStack(spacing: 4) {
                     Text("Full history")
                         .font(.system(size: 12, weight: .medium))
