@@ -2300,8 +2300,9 @@ extension View {
 }
 
 /// Grow a raw selection to the whole words it touches; a selection covering no
-/// word characters snaps to nothing.
-private func snapWords(_ range: NSRange, in ns: NSString) -> NSRange {
+/// word characters snaps to nothing. Internal: the main window's translator
+/// reuses it for its own select-to-explain.
+func snapWords(_ range: NSRange, in ns: NSString) -> NSRange {
     let empty = NSRange(location: range.location, length: 0)
     guard range.length > 0, range.location >= 0, NSMaxRange(range) <= ns.length else { return empty }
     let wordSet = CharacterSet.alphanumerics

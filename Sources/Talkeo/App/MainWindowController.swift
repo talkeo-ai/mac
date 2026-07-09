@@ -418,6 +418,31 @@ final class TranslatePageModel: ObservableObject {
     /// Whether the history drawer (right side) is open.
     @Published var historyOpen = false
 
+    // MARK: Select-to-explain (mirrors the popover's highlight-to-explain)
+
+    /// A word/phrase picked to learn: the term, its sentence context and explain
+    /// direction, plus which pane it came from and where — so the pane draws a
+    /// persistent marker over it and the card area below can teach it.
+    struct PickedTerm {
+        let text: String
+        let sentence: String
+        let sourceLang: String
+        let targetLang: String
+        let pane: Pane
+        let range: NSRange
+    }
+
+    enum Pane { case source, output }
+
+    @Published private(set) var terms: [PickedTerm] = []
+    @Published private(set) var activeTermIndex: Int?
+    /// Loaded cards, in-flight terms and failures, all keyed by term text —
+    /// re-picking a term reuses its card instead of re-requesting.
+    @Published private(set) var cards: [String: ExplainCard] = [:]
+    @Published private(set) var loadingTerms: Set<String> = []
+    @Published private(set) var cardErrors: [String: String] = [:]
+    private var explainTasks: [String: Task<Void, Never>] = [:]
+
     private let client: TransformClient
     private let history: HistoryStore
     private var streamTask: Task<Void, Never>?
@@ -446,6 +471,9 @@ final class TranslatePageModel: ObservableObject {
     /// Debounced translate-as-you-type, Google Translate style.
     func sourceEdited() {
         debounceTask?.cancel()
+        // Typing moves the text under any picked terms — drop them right away
+        // (not at the debounce) so no marker ever floats over the wrong word.
+        clearSelection()
         let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             reset(keepText: true)
@@ -463,6 +491,9 @@ final class TranslatePageModel: ObservableObject {
         streamTask?.cancel()
         generation += 1
         let gen = generation
+        // A new translation replaces the output (and may re-detect the pair);
+        // picked terms belong to the old text.
+        clearSelection()
 
         let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
@@ -516,6 +547,7 @@ final class TranslatePageModel: ObservableObject {
         debounceTask?.cancel()
         streamTask?.cancel()
         generation += 1
+        clearSelection()
         pinnedSource = nil
         detected = entry.detectedLang
         sourceText = entry.source
@@ -533,9 +565,114 @@ final class TranslatePageModel: ObservableObject {
         refreshHistory()
     }
 
+    var activeTerm: PickedTerm? {
+        guard let i = activeTermIndex, terms.indices.contains(i) else { return nil }
+        return terms[i]
+    }
+
+    /// Marker ranges (and which is focused) for a pane, so its text view can
+    /// highlight the picked words.
+    func highlights(for pane: Pane) -> [(range: NSRange, active: Bool)] {
+        terms.enumerated().compactMap { idx, term in
+            term.pane == pane ? (term.range, idx == activeTermIndex) : nil
+        }
+    }
+
+    /// The user picked `term` in `pane`: focus it (or add it) and load its card.
+    /// Direction mirrors the popover — the term is explained into the other
+    /// language of the pair.
+    func pick(term: String, pane: Pane, range: NSRange) {
+        let clean = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        let termLang = pane == .source ? effectiveSource : targetLang
+        let item = PickedTerm(
+            text: clean,
+            sentence: pane == .source ? sourceText : outputText,
+            sourceLang: termLang,
+            targetLang: termLang == "EN" ? "ES" : "EN",
+            pane: pane,
+            range: range
+        )
+        // Re-selecting the exact same span just focuses it.
+        if let i = terms.firstIndex(where: { $0.pane == pane && NSEqualRanges($0.range, range) }) {
+            activeTermIndex = i
+        } else {
+            // No stacking: a new span replaces any markers it overlaps in this pane.
+            terms.removeAll { $0.pane == pane && NSIntersectionRange($0.range, range).length > 0 }
+            terms.append(item)
+            activeTermIndex = terms.count - 1
+        }
+        loadCardIfNeeded(item)
+    }
+
+    /// Move focus between the picked terms (‹ › pager, wraps).
+    func stepTerm(by delta: Int) {
+        guard !terms.isEmpty else { return }
+        let current = activeTermIndex ?? 0
+        activeTermIndex = (current + delta + terms.count) % terms.count
+        if let term = activeTerm { loadCardIfNeeded(term) }
+    }
+
+    /// Remove the focused term (and its card), focusing a neighbour.
+    func removeActiveTerm() {
+        guard let i = activeTermIndex, terms.indices.contains(i) else { return }
+        let key = terms[i].text
+        explainTasks[key]?.cancel(); explainTasks[key] = nil
+        cards[key] = nil
+        loadingTerms.remove(key)
+        cardErrors[key] = nil
+        terms.remove(at: i)
+        activeTermIndex = terms.isEmpty ? nil : min(i, terms.count - 1)
+    }
+
+    func retryActiveCard() {
+        guard let item = activeTerm else { return }
+        cards[item.text] = nil
+        cardErrors[item.text] = nil
+        loadCardIfNeeded(item)
+    }
+
+    private func loadCardIfNeeded(_ item: PickedTerm) {
+        let key = item.text
+        guard cards[key] == nil, !loadingTerms.contains(key) else { return }
+        cardErrors[key] = nil
+        loadingTerms.insert(key)
+        explainTasks[key] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let card = try await self.client.explainCard(
+                    term: item.text,
+                    sentence: item.sentence,
+                    sourceLang: item.sourceLang,
+                    targetLang: item.targetLang
+                )
+                guard !Task.isCancelled else { return }
+                self.cards[key] = card
+                self.loadingTerms.remove(key)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.loadingTerms.remove(key)
+                self.cardErrors[key] = QuickTranslateModel.message(error)
+            }
+        }
+    }
+
+    /// Drop every picked term and its cards. Any change to the panes' text
+    /// (typing, a new translation, loading history) invalidates the ranges.
+    func clearSelection() {
+        explainTasks.values.forEach { $0.cancel() }
+        explainTasks = [:]
+        terms = []
+        activeTermIndex = nil
+        cards = [:]
+        loadingTerms = []
+        cardErrors = [:]
+    }
+
     private func reset(keepText: Bool) {
         streamTask?.cancel()
         generation += 1
+        clearSelection()
         if !keepText { sourceText = "" }
         outputText = ""
         detected = nil
@@ -605,8 +742,9 @@ private struct TranslatePage: View {
             }
             .frame(height: 260)
 
-            // Reserved: selected meanings (explain cards) will live here.
-            Spacer(minLength: 0)
+            // Selected meanings: pick a word in either pane and it's taught
+            // here (the popover's select-to-learn, at home in the app).
+            cardArea
         }
         .padding(.horizontal, 48)
         .padding(.top, 40)
@@ -669,7 +807,12 @@ private struct TranslatePage: View {
 
     private var sourcePane: some View {
         ZStack(alignment: .topLeading) {
-            PlainTextEditor(text: $model.sourceText, onUserEdit: { model.sourceEdited() })
+            PlainTextEditor(
+                text: $model.sourceText,
+                onUserEdit: { model.sourceEdited() },
+                onWordSelect: { term, range in model.pick(term: term, pane: .source, range: range) },
+                markers: model.highlights(for: .source)
+            )
                 .padding(.top, 10)
                 .padding(.leading, 10)
                 .padding(.bottom, 10)
@@ -727,7 +870,12 @@ private struct TranslatePage: View {
                 }
             } else {
                 // Read-only native text view: real selection/copy behavior.
-                PlainTextEditor(text: .constant(model.outputText), isEditable: false)
+                PlainTextEditor(
+                    text: .constant(model.outputText),
+                    isEditable: false,
+                    onWordSelect: { term, range in model.pick(term: term, pane: .output, range: range) },
+                    markers: model.highlights(for: .output)
+                )
                     .padding(.top, 10)
                     .padding(.leading, 10)
                     .padding(.trailing, 10)
@@ -745,6 +893,219 @@ private struct TranslatePage: View {
                 CopyButton(text: model.outputText)
                     .padding(8)
             }
+        }
+    }
+
+    /// The learning area under the panes: the focused picked term's card
+    /// (shimmer while it loads, retry on failure), or empty space when nothing
+    /// is picked.
+    @ViewBuilder
+    private var cardArea: some View {
+        if model.activeTerm != nil {
+            ScrollView {
+                ExplainCardPane(model: model)
+                    .frame(maxWidth: 680, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 10)
+                    .padding(.bottom, 16)
+            }
+        } else {
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+// MARK: - Explain card (select-to-learn)
+
+/// The vocab card for the focused picked term, mirroring the popover's:
+/// headword → meanings with a speaker, ‹ › pager across picked terms, examples
+/// (term bolded) each with their own speaker, and the optional insight note.
+private struct ExplainCardPane: View {
+    @ObservedObject var model: TranslatePageModel
+
+    var body: some View {
+        if let term = model.activeTerm {
+            VStack(alignment: .leading, spacing: 18) {
+                headword(term)
+                if let card = model.cards[term.text] {
+                    if !card.examples.isEmpty { examples(card) }
+                    if let insight = card.insight { insightView(insight) }
+                } else if let error = model.cardErrors[term.text] {
+                    errorView(error)
+                } else {
+                    shimmer
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// Headword row: term → meanings (once loaded) + speaker + pager + close.
+    private func headword(_ term: TranslatePageModel.PickedTerm) -> some View {
+        let card = model.cards[term.text]
+        return HStack(alignment: .top, spacing: 10) {
+            Group {
+                if let card {
+                    Text(card.term)
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(Palette.foreground)
+                    + Text("  →  ")
+                        .font(.system(size: 16))
+                        .foregroundColor(Palette.tertiary)
+                    + Text(card.meanings.joined(separator: " / "))
+                        .font(.system(size: 16))
+                        .foregroundColor(Palette.muted)
+                } else {
+                    Text(term.text)
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(Palette.foreground)
+                }
+            }
+            .lineSpacing(3)
+            .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 4)
+
+            if let card {
+                // The English side to read aloud: the term itself if it's
+                // English, otherwise its English equivalent (first meaning).
+                SpeakerButton(english: term.sourceLang == "EN" ? card.term : (card.meanings.first ?? card.term))
+            }
+            if model.terms.count > 1 { pager }
+            PaneIconButton(system: "xmark", help: "Close", size: 24) { model.removeActiveTerm() }
+        }
+    }
+
+    private var pager: some View {
+        HStack(spacing: 8) {
+            Button(action: { model.stepTerm(by: -1) }) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 11, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            Text("\((model.activeTermIndex ?? 0) + 1) / \(model.terms.count)")
+                .font(.system(size: 12, weight: .medium))
+                .monospacedDigit()
+            Button(action: { model.stepTerm(by: 1) }) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .foregroundStyle(Palette.muted)
+        .padding(.top, 4)
+    }
+
+    /// Examples: term's side (term bolded) over the user's side, each pair
+    /// with a Listen for the English.
+    private func examples(_ card: ExplainCard) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(card.examples.indices, id: \.self) { i in
+                let ex = card.examples[i]
+                HStack(alignment: .top, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        markdownBold(ex.source)
+                            .font(.system(size: 15))
+                            .foregroundStyle(Palette.foreground)
+                            .lineSpacing(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                        markdownBold(ex.target)
+                            .font(.system(size: 14))
+                            .foregroundStyle(Palette.muted)
+                            .lineSpacing(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 4)
+                    SpeakerButton(english: Self.plain(ex.source))
+                }
+            }
+        }
+    }
+
+    private func insightView(_ insight: ExplainCard.Insight) -> some View {
+        let warning = insight.kind == .falseFriend
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: warning ? "exclamationmark.triangle.fill" : "lightbulb.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(warning ? Color.orange.opacity(0.9) : Palette.tertiary)
+                .padding(.top, 2)
+            Text(insight.text)
+                .font(.system(size: 14))
+                .foregroundStyle(Palette.muted)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Palette.elevated)
+        )
+    }
+
+    private func errorView(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(message)
+                .font(.system(size: 13))
+                .foregroundStyle(Palette.muted)
+            Button("Try again") { model.retryActiveCard() }
+                .buttonStyle(.plain)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Palette.foreground)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Capsule().stroke(Palette.border, lineWidth: 1))
+        }
+    }
+
+    /// Shaped like the card it stands in for — a meanings line plus two example
+    /// pairs — so the swap to real content is a small settle, not a big grow.
+    private var shimmer: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            shimmerBar(width: 260, height: 14)
+            VStack(alignment: .leading, spacing: 5) {
+                shimmerBar(width: 320, height: 12)
+                shimmerBar(width: 250, height: 11)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                shimmerBar(width: 290, height: 12)
+                shimmerBar(width: 220, height: 11)
+            }
+        }
+    }
+
+    private func shimmerBar(width: CGFloat, height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .fill(Palette.elevated)
+            .frame(width: width, height: height)
+    }
+
+    /// Render markdown so the backend's `**term**` shows in bold.
+    private func markdownBold(_ string: String) -> Text {
+        if let attributed = try? AttributedString(markdown: string) {
+            return Text(attributed)
+        }
+        return Text(string)
+    }
+
+    /// Strip markdown bold markers so the spoken text is clean.
+    private static func plain(_ string: String) -> String {
+        string.replacingOccurrences(of: "**", with: "")
+    }
+}
+
+/// Small quiet speaker that reads English aloud (offline voice).
+private struct SpeakerButton: View {
+    let english: String
+
+    var body: some View {
+        PaneIconButton(system: "speaker.wave.2", help: "Listen", size: 24) {
+            Speaker.speak(english, lang: "EN")
         }
     }
 }
@@ -967,6 +1328,13 @@ private struct PlainTextEditor: NSViewRepresentable {
     /// Fired only on user edits (typing/paste) — programmatic `text` updates
     /// don't trigger it, so loading history entries doesn't re-translate.
     var onUserEdit: (() -> Void)?
+    /// Select-to-explain: fired when a mouse selection settles, snapped to
+    /// whole words. Read-only panes then collapse the OS selection so the
+    /// marker is the pick indicator; editable ones keep it (type-over-selection
+    /// must still work).
+    var onWordSelect: ((String, NSRange) -> Void)?
+    /// Picked-term markers drawn behind the text (rounded, popover-style).
+    var markers: [(range: NSRange, active: Bool)] = []
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -993,6 +1361,26 @@ private struct PlainTextEditor: NSViewRepresentable {
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.delegate = context.coordinator
 
+        // Word-snapped pick on mouse-up (select-to-explain). Reads the fresh
+        // struct through the coordinator — the closure outlives this render.
+        let coordinator = context.coordinator
+        textView.onSettled = { [weak textView] in
+            guard let textView, let onWordSelect = coordinator.parent.onWordSelect else { return }
+            let raw = textView.selectedRange()
+            guard raw.length > 0 else { return }
+            let ns = textView.string as NSString
+            let snapped = snapWords(raw, in: ns)
+            guard snapped.length > 0 else { return }
+            onWordSelect(ns.substring(with: snapped), snapped)
+            // Collapse the OS selection in read-only panes so only the marker
+            // shows the pick; editable panes keep it for type-over.
+            if !textView.isEditable {
+                DispatchQueue.main.async { [weak textView] in
+                    textView?.setSelectedRange(NSRange(location: NSMaxRange(snapped), length: 0))
+                }
+            }
+        }
+
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 4
         textView.defaultParagraphStyle = paragraph
@@ -1014,15 +1402,21 @@ private struct PlainTextEditor: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let textView = scroll.documentView as? NSTextView else { return }
+        guard let textView = scroll.documentView as? ShortcutTextView else { return }
+        context.coordinator.parent = self
         textView.isEditable = isEditable
         if textView.string != text {
             textView.string = text
         }
+        // Drop any marker that outran the text (belt over the model's
+        // clear-on-edit) so drawing never indexes past the storage.
+        let length = (textView.string as NSString).length
+        textView.markers = markers.filter { NSMaxRange($0.range) <= length }
+        textView.needsDisplay = true
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
-        private let parent: PlainTextEditor
+        var parent: PlainTextEditor
         init(_ parent: PlainTextEditor) { self.parent = parent }
 
         func textDidChange(_ notification: Notification) {
@@ -1035,8 +1429,44 @@ private struct PlainTextEditor: NSViewRepresentable {
 
 /// NSTextView that resolves the standard editing shortcuts itself, so they
 /// work no matter what the main menu offers (the fix feat/ui-options landed
-/// for the popover inputs, applied here too).
+/// for the popover inputs, applied here too). Also reports settled mouse
+/// selections and draws the picked-term markers (select-to-explain).
 private final class ShortcutTextView: NSTextView {
+    /// Called after a mouse click/drag finishes, with the selection settled.
+    var onSettled: (() -> Void)?
+    /// Picked word ranges to draw (range, isFocused).
+    var markers: [(range: NSRange, active: Bool)] = []
+
+    /// `mouseDown` runs the whole selection drag loop; when it returns the
+    /// selection is final — same pattern as the popover's text view.
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        onSettled?()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        drawMarkers()
+        super.draw(dirtyRect)
+    }
+
+    /// Rounded marker behind each picked word; the focused one reads stronger.
+    private func drawMarkers() {
+        guard !markers.isEmpty, let lm = layoutManager, let tc = textContainer else { return }
+        let origin = textContainerOrigin
+        for marker in markers {
+            let glyphRange = lm.glyphRange(forCharacterRange: marker.range, actualCharacterRange: nil)
+            lm.enumerateEnclosingRects(
+                forGlyphRange: glyphRange,
+                withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                in: tc
+            ) { rect, _ in
+                let frame = rect.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: -3, dy: 0)
+                Palette.marker(active: marker.active).setFill()
+                NSBezierPath(roundedRect: frame, xRadius: 6, yRadius: 6).fill()
+            }
+        }
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard event.type == .keyDown, mods == .command || mods == [.command, .shift] else {
