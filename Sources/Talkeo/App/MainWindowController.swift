@@ -572,11 +572,12 @@ private struct TranslatePage: View {
             translator
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
+            // Shown/hidden instantly — a slide here fights the HStack's width
+            // relayout and looks off; snappy beats janky.
             if model.historyOpen {
                 Divider().overlay(Palette.border)
                 HistoryPanel(model: model)
                     .frame(width: 320)
-                    .transition(.move(edge: .trailing))
             }
         }
         .onAppear { model.refreshHistory() }
@@ -594,12 +595,7 @@ private struct TranslatePage: View {
                 languageBar
                 HStack {
                     Spacer()
-                    PaneIconButton(
-                        system: "clock.arrow.circlepath",
-                        help: model.historyOpen ? "Hide history" : "History"
-                    ) {
-                        withAnimation(.easeOut(duration: 0.18)) { model.historyOpen.toggle() }
-                    }
+                    HistoryToggle(isOpen: model.historyOpen) { model.historyOpen.toggle() }
                 }
             }
 
@@ -619,16 +615,10 @@ private struct TranslatePage: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// Same column geometry as the panes below: each chip centers over its
-    /// pane, the swap sits on the gutter.
+    /// Compact centered cluster: source chip · swap · target chip.
     private var languageBar: some View {
-        HStack(spacing: 14) {
-            HStack {
-                Spacer(minLength: 0)
-                sourceMenu
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity)
+        HStack(spacing: 10) {
+            sourceMenu
 
             Button(action: { model.swap() }) {
                 Image(systemName: "arrow.left.arrow.right")
@@ -641,12 +631,7 @@ private struct TranslatePage: View {
             .buttonStyle(.plain)
             .help("Swap languages")
 
-            HStack {
-                Spacer(minLength: 0)
-                targetMenu
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity)
+            targetMenu
         }
     }
 
@@ -815,8 +800,36 @@ private struct CopyButton: View {
     }
 }
 
-/// Right-side history drawer: quiet, Google-style rows (language pair line,
-/// source/target, delete on hover) separated by hairlines.
+/// Labeled toggle for the history drawer — icon + text so it doesn't read as
+/// decoration.
+private struct HistoryToggle: View {
+    let isOpen: Bool
+    let action: () -> Void
+    @State private var isHover = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("History")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .foregroundStyle(isOpen || isHover ? Palette.foreground : Palette.muted)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Capsule().fill(Palette.elevated))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHover = $0 }
+        .help(isOpen ? "Hide history" : "Show history")
+    }
+}
+
+/// Right-side history drawer. Rows are self-contained hover cards (no
+/// separators): the rounded hover fill matches the row bounds exactly, the
+/// modern list treatment (Raycast/Linear-style).
 private struct HistoryPanel: View {
     @ObservedObject var model: TranslatePageModel
 
@@ -828,36 +841,32 @@ private struct HistoryPanel: View {
                     .foregroundStyle(Palette.foreground)
                 Spacer()
                 PaneIconButton(system: "xmark", help: "Close history") {
-                    withAnimation(.easeOut(duration: 0.18)) { model.historyOpen = false }
+                    model.historyOpen = false
                 }
             }
-            .padding(.horizontal, 18)
+            .padding(.horizontal, 20)
             .padding(.top, 20)
-            .padding(.bottom, 8)
+            .padding(.bottom, 10)
 
             if model.entries.isEmpty {
                 Text("Translations you make will show up here.")
                     .font(.system(size: 13))
                     .foregroundStyle(Palette.muted)
-                    .padding(.horizontal, 18)
+                    .padding(.horizontal, 20)
                     .padding(.top, 8)
                 Spacer(minLength: 0)
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
+                    LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(model.entries) { entry in
                             HistoryRow(
                                 entry: entry,
                                 select: { model.select(entry) },
                                 delete: { model.delete(entry) }
                             )
-                            if entry.id != model.entries.last?.id {
-                                Divider()
-                                    .overlay(Palette.border)
-                                    .padding(.horizontal, 18)
-                            }
                         }
                     }
+                    .padding(.horizontal, 10)
                     .padding(.bottom, 12)
                 }
             }
@@ -874,10 +883,10 @@ private struct HistoryRow: View {
 
     var body: some View {
         Button(action: select) {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text("\(QuickTranslateModel.languageName(entry.detectedLang)) → \(QuickTranslateModel.languageName(entry.translateLang))")
-                        .font(.system(size: 11))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Palette.tertiary)
                     Spacer(minLength: 0)
                     PaneIconButton(system: "trash", help: "Delete", size: 20) { delete() }
@@ -892,11 +901,14 @@ private struct HistoryRow: View {
                     .foregroundStyle(Palette.muted)
                     .lineLimit(1)
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isHover ? Palette.elevated : Color.clear)
-            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isHover ? Palette.elevated : Color.clear)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { isHover = $0 }
