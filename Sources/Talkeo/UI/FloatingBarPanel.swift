@@ -74,6 +74,10 @@ final class FloatingBarPanel {
     /// it restores the arrow exactly once (a background-set cursor that nobody
     /// else corrects would otherwise stick, e.g. over the desktop).
     private var cursorIsOverBar = false
+    /// Frames of the action buttons in the content's SwiftUI space (top-left
+    /// origin), reported by the view — the hand cursor applies only there;
+    /// the rest of the glass shows the plain arrow.
+    private var buttonRects: [CGRect] = []
     /// The screen the bar is pinned to. Cached so it never flips to an adjacent
     /// display when auto-hide slides the panel partly off the edge.
     private var homeScreen: NSScreen?
@@ -87,11 +91,13 @@ final class FloatingBarPanel {
         var onTranslateRef: (() -> Void)?
         var onImproveRef: (() -> Void)?
         var onListenRef: (() -> Void)?
+        var onButtonFramesRef: (([CGRect]) -> Void)?
         let view = FloatingBarView(
             model: model,
             onTranslate: { onTranslateRef?() },
             onImprove: { onImproveRef?() },
-            onListen: { onListenRef?() }
+            onListen: { onListenRef?() },
+            onButtonFrames: { onButtonFramesRef?($0) }
         )
         let hosting = NSHostingView(rootView: view)
         hosting.layoutSubtreeIfNeeded()
@@ -122,6 +128,7 @@ final class FloatingBarPanel {
         onTranslateRef = { [weak self] in self?.onTranslate?() }
         onImproveRef = { [weak self] in self?.onImprove?() }
         onListenRef = { [weak self] in self?.onListen?() }
+        onButtonFramesRef = { [weak self] rects in self?.buttonRects = rects }
         // Without this the window server is free to ignore cursor sets from a
         // non-active app outright — the bar could never fix the cursor at all
         // while e.g. a focused terminal asserts its I-beam.
@@ -135,20 +142,18 @@ final class FloatingBarPanel {
     /// non-activating panel, so we watch mouse-moves ourselves (global for
     /// moves delivered to other apps, local for our own) and keep the cursor
     /// in sync with where it sits. `BackgroundCursor` makes those sets stick.
-    /// These handlers run for every mouse move on the system, so they must be
-    /// cheap: the event already carries the location (no window-server query),
-    /// leaving just a rect test on the common path.
+    /// The screen position is queried fresh, NOT read off the event: a global
+    /// monitor's `locationInWindow` is relative to the *receiving app's*
+    /// window (unresolvable from here), so treating it as screen coordinates
+    /// put the cursor in the wrong zone on most moves — visible as a rapid
+    /// arrow/hand strobe.
     private func installCursorMonitor() {
         removeCursorMonitor()
-        let global = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            // Global mouse-moved events have no window: their location is
-            // already in screen coordinates.
-            self?.syncCursor(at: event.locationInWindow)
+        let global = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
+            self?.syncCursor()
         }
         let local = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            let screenPoint = event.window.map { $0.convertPoint(toScreen: event.locationInWindow) }
-                ?? event.locationInWindow
-            self?.syncCursor(at: screenPoint)
+            self?.syncCursor()
             return event
         }
         cursorMonitors = [global, local].compactMap { $0 }
@@ -167,26 +172,37 @@ final class FloatingBarPanel {
         panel.frame.insetBy(dx: Self.shadowPad, dy: Self.shadowPad)
     }
 
-    /// Keep the cursor truthful around the bar: pointing-hand while over the
-    /// visible pill, restored to the arrow the moment it leaves (the active
-    /// app re-applies its own cursor on its next mouse-move if it wants
-    /// something else, e.g. an I-beam over text). Callers with a location in
-    /// hand pass it; timer/lifecycle callers fall back to querying it.
-    private func syncCursor(at location: NSPoint? = nil) {
-        let point = location ?? NSEvent.mouseLocation
-        if panel.isVisible, cursorRect.contains(point) {
-            cursorIsOverBar = true
-            // One set per move while inside: the active app stomps the cursor
-            // per move it receives, so matching its rate keeps us on top.
-            NSCursor.pointingHand.set()
-            startCursorReassertTimer()
-        } else {
+    /// Keep the cursor truthful around the bar with standard hover semantics:
+    /// pointing-hand over the action buttons, plain arrow over the rest of the
+    /// glass, and the app behind's own cursor once it leaves (arrow restored
+    /// exactly once on exit). Over the bar the cursor is always *asserted*,
+    /// never left alone — the active app keeps re-setting its own cursor
+    /// (e.g. a terminal's I-beam) on every move it receives, and ours must
+    /// land on top.
+    private func syncCursor() {
+        let point = NSEvent.mouseLocation
+        guard panel.isVisible, cursorRect.contains(point) else {
             stopCursorReassertTimer()
             if cursorIsOverBar {
                 cursorIsOverBar = false
                 NSCursor.arrow.set()
             }
+            return
         }
+        cursorIsOverBar = true
+        let overButton = buttonRects.contains { $0.contains(barPoint(point)) }
+        (overButton ? NSCursor.pointingHand : NSCursor.arrow).set()
+        startCursorReassertTimer()
+    }
+
+    /// Convert a screen point into the bar content's SwiftUI space (top-left
+    /// origin, spans the whole window), where the button frames are reported.
+    private func barPoint(_ screenPoint: NSPoint) -> CGPoint {
+        let frame = panel.frame
+        return CGPoint(
+            x: screenPoint.x - frame.origin.x,
+            y: frame.height - (screenPoint.y - frame.origin.y)
+        )
     }
 
     private func startCursorReassertTimer() {
@@ -379,11 +395,28 @@ final class FloatingBarModel: ObservableObject {
     @Published var hasSelection = false
 }
 
+/// Collects the bar buttons' frames (in `FloatingBarView.spaceName` space) so
+/// the panel can scope the hand cursor to the actual controls.
+private struct BarButtonFramesKey: PreferenceKey {
+    static var defaultValue: [CGRect] = []
+    static func reduce(value: inout [CGRect], nextValue: () -> [CGRect]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
 struct FloatingBarView: View {
     @ObservedObject var model: FloatingBarModel
     var onTranslate: () -> Void = {}
     var onImprove: () -> Void = {}
     var onListen: () -> Void = {}
+    /// Reports the buttons' frames in `spaceName` space (== the window
+    /// content, since the panel hugs this view exactly) so the AppKit side
+    /// can scope the hand cursor to them.
+    var onButtonFrames: ([CGRect]) -> Void = { _ in }
+
+    /// Coordinate space covering the whole bar content including the shadow
+    /// padding — window coordinates by construction.
+    static let spaceName = "bar"
 
     private var stack: some View {
         VStack(spacing: 5) {
@@ -417,6 +450,8 @@ struct FloatingBarView: View {
             // center in the window (the panel sizes to this), so shown and
             // auto-hidden states share the exact same vertical center.
             .padding(8)
+            .coordinateSpace(name: FloatingBarView.spaceName)
+            .onPreferenceChange(BarButtonFramesKey.self) { onButtonFrames($0) }
         // Full opacity for a clean, native glass look — staying out of the way
         // is handled by auto-hide, not by fading the bar. No hover tracking at
         // this level either: the cursor is owned by FloatingBarPanel.syncCursor,
@@ -477,6 +512,13 @@ private struct BarButton: View {
         .help(help)
         // Highlight only — the hand cursor is owned by FloatingBarPanel.syncCursor.
         .onHover { isHover = $0 }
+        // Report where this button sits so the hand cursor applies exactly here.
+        .background(GeometryReader { geo in
+            Color.clear.preference(
+                key: BarButtonFramesKey.self,
+                value: [geo.frame(in: .named(FloatingBarView.spaceName))]
+            )
+        })
         .animation(.easeOut(duration: 0.18), value: isActive)
     }
 }
