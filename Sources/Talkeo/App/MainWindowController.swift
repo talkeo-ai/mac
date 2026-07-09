@@ -102,22 +102,25 @@ final class MainWindowController: NSObject {
 
 // MARK: - Navigation
 
-/// Sections of the main window's left-hand rail. The first four mirror the
-/// floating bar's actions; the last two are the user-facing record (transcript
-/// of past translations, estimated English level).
+/// Sections of the main window's left-hand rail: AI conversation (chat,
+/// voice teacher), the floating bar's tools, the user-facing record
+/// (transcript, estimated English level), and settings pinned at the bottom.
 enum MainSection: String, CaseIterable, Identifiable {
-    case translate, improve, listen, capture, transcript, englishLevel
+    case chat, teacher, translate, improve, listen, capture, transcript, englishLevel, settings
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .chat: return "Chat"
+        case .teacher: return "Teacher"
         case .translate: return "Translate"
         case .improve: return "Improve"
         case .listen: return "Listen"
         case .capture: return "Capture"
         case .transcript: return "Transcript"
         case .englishLevel: return "English level"
+        case .settings: return "Settings"
         }
     }
 
@@ -131,15 +134,19 @@ enum MainSection: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
+        case .chat: return "bubble.left.and.bubble.right.fill"
+        case .teacher: return "graduationcap.fill"
         case .translate: return "character.bubble.fill"
         case .improve: return "wand.and.stars"
         case .listen: return "speaker.wave.2.fill"
         case .capture: return "camera.viewfinder"
         case .transcript: return "list.bullet.rectangle.fill"
         case .englishLevel: return "chart.bar.fill"
+        case .settings: return "gearshape.fill"
         }
     }
 
+    static let ai: [MainSection] = [.chat, .teacher]
     static let tools: [MainSection] = [.translate, .improve, .listen, .capture]
     static let progress: [MainSection] = [.transcript, .englishLevel]
 }
@@ -176,34 +183,57 @@ struct MainWindowView: View {
 
     private var rail: some View {
         VStack(spacing: 6) {
-            BrandMark(cornerRadius: 9)
-                .frame(width: 34, height: 34)
-                .padding(.top, 48)
-                .padding(.bottom, 22)
+            ForEach(MainSection.ai) { item in
+                RailItem(item: item, isSelected: selection == item) { selection = item }
+            }
+
+            railDivider
 
             ForEach(MainSection.tools) { item in
                 RailItem(item: item, isSelected: selection == item) { selection = item }
             }
 
-            Divider()
-                .overlay(Palette.border)
-                .frame(width: 30)
-                .padding(.vertical, 10)
+            railDivider
 
             ForEach(MainSection.progress) { item in
                 RailItem(item: item, isSelected: selection == item) { selection = item }
             }
 
             Spacer(minLength: 0)
+
+            RailItem(item: .settings, isSelected: selection == .settings) { selection = .settings }
+                .padding(.bottom, 14)
         }
+        .padding(.top, 52)
         .padding(.horizontal, 10)
         .frame(width: 92)
         .frame(maxHeight: .infinity)
     }
 
+    private var railDivider: some View {
+        Divider()
+            .overlay(Palette.border)
+            .frame(width: 30)
+            .padding(.vertical, 10)
+    }
+
     @ViewBuilder
     private var detail: some View {
         switch selection {
+        case .chat:
+            ToolPage(
+                section: .chat,
+                summary: "Ask anything, ChatGPT-style — a chat that knows you're learning English.",
+                steps: [],
+                comingSoon: true
+            )
+        case .teacher:
+            ToolPage(
+                section: .teacher,
+                summary: "Talk out loud with an AI teacher — real voice conversation, adapted to your level.",
+                steps: [],
+                comingSoon: true
+            )
         case .translate:
             ToolPage(
                 section: .translate,
@@ -245,6 +275,13 @@ struct MainWindowView: View {
             TranscriptPage()
         case .englishLevel:
             EnglishLevelPage()
+        case .settings:
+            ToolPage(
+                section: .settings,
+                summary: "Providers, voices and behavior — configure how Talkeo works.",
+                steps: [],
+                comingSoon: true
+            )
         }
     }
 }
@@ -485,33 +522,6 @@ private struct PageHeader: View {
                 .font(.system(size: 15))
                 .foregroundStyle(Palette.muted)
         }
-    }
-}
-
-/// Bundle brand icon with a symbol fallback, mirroring the status bar and
-/// floating bar treatment.
-private struct BrandMark: View {
-    var cornerRadius: CGFloat = 8
-
-    var body: some View {
-        Group {
-            if let url = Bundle.main.url(forResource: "icon", withExtension: "png"),
-               let nsImage = NSImage(contentsOf: url) {
-                Image(nsImage: nsImage)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFill()
-            } else {
-                Image(systemName: "text.viewfinder")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Palette.foreground)
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(Palette.border, lineWidth: 1)
-        )
     }
 }
 
