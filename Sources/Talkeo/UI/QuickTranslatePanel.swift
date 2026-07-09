@@ -16,11 +16,10 @@ import SwiftUI
 /// style): opening an option means the user wants to use it, so typing and
 /// clicking work immediately — but activating would raise every other Talkeo
 /// window too (e.g. the main app window, when open). The app behind keeps
-/// being the frontmost app, which Improve's Replace depends on. Cursor
-/// correctness inside a key-but-inactive window comes from the same
-/// per-window server tag the floating bar uses (`BackgroundCursor.tagWindow`,
-/// whose documented purpose is exactly this: panels presenting editable
-/// controls from an inactive app).
+/// being the frontmost app, which Improve's Replace depends on. The trade-off
+/// is the pointer image: cursor authority stays with the active app, so
+/// cursor hints from a key-but-inactive window are best-effort — the same
+/// deal Apple's own non-activating panels get.
 final class QuickPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
@@ -170,10 +169,11 @@ final class QuickTranslatePanel {
     }
 
     /// Improve tapped with nothing selected — show the compose box + recent
-    /// rewrites. A bare tap while the popover is already open (whatever it
-    /// shows) reads as "close it", so it toggles off instead of switching.
+    /// rewrites. A bare tap while one of Improve's OWN views is up reads as
+    /// "close it"; while another action's view is up it switches instead —
+    /// moving between bar actions must never just dismiss the popover.
     func showImproveHistory() {
-        if panel.isVisible {
+        if panel.isVisible, model.mode == .improve || model.mode == .improveHistory {
             hide()
             return
         }
@@ -196,10 +196,11 @@ final class QuickTranslatePanel {
     }
 
     /// Translate tapped with nothing selected — show the local history list.
-    /// A bare tap while the popover is already open (whatever it shows) reads
-    /// as "close it", so it toggles off instead of switching to history.
+    /// A bare tap while one of Translate's OWN views is up reads as "close
+    /// it"; while another action's view is up it switches instead (mirrors
+    /// `showImproveHistory`).
     func showHistory() {
-        if panel.isVisible {
+        if panel.isVisible, model.mode == .translate || model.mode == .history {
             hide()
             return
         }
@@ -207,10 +208,10 @@ final class QuickTranslatePanel {
         present()
     }
 
-    /// Listen tapped with nothing selected — show Listen's own history list
-    /// (mirrors `showHistory()`, including the toggle-to-close).
+    /// Listen tapped with nothing selected — show Listen's compose view
+    /// (mirrors `showHistory()`, including the same-action toggle-to-close).
     func showListenHistory() {
-        if panel.isVisible {
+        if panel.isVisible, model.mode == .listen {
             hide()
             return
         }
@@ -287,12 +288,6 @@ final class QuickTranslatePanel {
         // windows too (the main window, when open), yanking the user out of
         // their context just for a popover.
         panel.makeKey()
-        // Cursor authority while key-but-inactive (I-beam over text, etc.);
-        // async because tag application is asynchronous in the window server.
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            _ = BackgroundCursor.tagWindow(self.panel)
-        }
         installDismissMonitor()
         onVisibilityChange?(true)
     }

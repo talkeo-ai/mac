@@ -8,9 +8,16 @@ import SwiftUI
 /// selection they sit in a vertical pill the user can reach any time; the action
 /// reads the current selection on demand.
 ///
-/// Kept deliberately unobtrusive: dimmed at rest, full opacity on hover. This is
-/// an MVP to A/B the ergonomics against `TooltipPanel`, so it reuses that file's
-/// brand styling and is toggled on/off from the status-bar menu.
+/// Kept deliberately unobtrusive: it stays out of the way via Dock-style
+/// auto-hide rather than fading. This is an MVP to A/B the ergonomics against
+/// `TooltipPanel`, so it reuses that file's brand styling and is toggled
+/// on/off from the status-bar menu.
+///
+/// The bar never touches the pointer image: cursor authority belongs to the
+/// active app (the platform contract — Apple's own non-activating panels
+/// live with it too), and fighting that from a background app proved both
+/// unwinnable and a steady source of bugs. Interactivity is signalled by the
+/// buttons' hover ring and the hover tip instead.
 final class FloatingBarPanel {
     private let panel: NSPanel
     private let model: FloatingBarModel
@@ -62,40 +69,11 @@ final class FloatingBarPanel {
     private var revealed = true
     private var pollTimer: Timer?
     private var slideTimer: Timer?
-    private var cursorMonitors: [Any] = []
-    /// Ticks while the cursor sits over the bar, reasserting the pointing-hand.
-    /// Even with `BackgroundCursor` granted, the active app behind (e.g. a
-    /// terminal) keeps receiving the mouse-moved events — key stays with it by
-    /// design — and re-sets its own cursor on each one. That's a cross-process
-    /// last-writer race with no ordering primitive: our per-move set wins only
-    /// some exchanges, so during movement the cursor would visibly strobe
-    /// between ours and theirs. Reasserting at display rate bounds any loss to
-    /// ~8ms — below perception. The timer only runs while the cursor is over
-    /// the bar, so the steady-state cost elsewhere is zero.
-    private var cursorReassertTimer: Timer?
-    private static let cursorReassertInterval: TimeInterval = 1.0 / 120.0
-    /// Whether the last sync found the cursor over the visible pill, so leaving
-    /// it restores the arrow exactly once (a background-set cursor that nobody
-    /// else corrects would otherwise stick, e.g. over the desktop).
-    private var cursorIsOverBar = false
-    /// Label of the button currently under the cursor (nil = none), so the
-    /// hover tip reacts to changes only, not to every reassert tick.
+    /// Label of the button currently under the cursor (nil = none), so a
+    /// stale exit event can't hide the tip a newer enter just requested.
     private var hoveredButton: String?
     /// shadcn-style tip beside the bar naming the hovered button.
     private let tooltip = BarTooltipPanel()
-    /// Stand-in cursor for while the mouse RESTS over the bar (see
-    /// `CursorFreezeOverlay`): re-asserting can't fully hide the active app's
-    /// periodic stomps, so at rest the real cursor is hidden and its pixels
-    /// are ours. Any move unfreezes before anything else runs.
-    private let cursorFreeze = CursorFreezeOverlay()
-    /// When the mouse last physically moved, so the freeze kicks in only at
-    /// rest — while moving, per-move re-asserts already mask the stomps.
-    private var lastMouseMoveAt: CFTimeInterval = 0
-    private static let freezeAfter: TimeInterval = 0.15
-    /// Whether the panel already carries the per-window cursor tag (see
-    /// `BackgroundCursor.tagWindow`). Tagging needs a live window number, so
-    /// it's applied on show and retried until it takes.
-    private var windowTagged = false
     /// The screen the bar is pinned to. Cached so it never flips to an adjacent
     /// display when auto-hide slides the panel partly off the edge.
     private var homeScreen: NSScreen?
@@ -110,12 +88,14 @@ final class FloatingBarPanel {
         var onTranslateRef: (() -> Void)?
         var onImproveRef: (() -> Void)?
         var onListenRef: (() -> Void)?
+        var onButtonHoverRef: ((String, Bool) -> Void)?
         let view = FloatingBarView(
             model: model,
             onOpenApp: { onOpenAppRef?() },
             onTranslate: { onTranslateRef?() },
             onImprove: { onImproveRef?() },
-            onListen: { onListenRef?() }
+            onListen: { onListenRef?() },
+            onButtonHover: { onButtonHoverRef?($0, $1) }
         )
         let hosting = NSHostingView(rootView: view)
         hosting.layoutSubtreeIfNeeded()
@@ -149,114 +129,28 @@ final class FloatingBarPanel {
         onTranslateRef = { [weak self] in self?.tooltip.hide(); self?.onTranslate?() }
         onImproveRef = { [weak self] in self?.tooltip.hide(); self?.onImprove?() }
         onListenRef = { [weak self] in self?.tooltip.hide(); self?.onListen?() }
-        // Without this the window server is free to ignore cursor sets from a
-        // non-active app outright — the bar could never fix the cursor at all
-        // while e.g. a focused terminal asserts its I-beam.
-        _ = BackgroundCursor.isEnabled
-        installCursorMonitor()
-    }
-
-    deinit { removeCursorMonitor() }
-
-    /// SwiftUI's hover tracking can't own the cursor on a non-key,
-    /// non-activating panel, so we watch mouse-moves ourselves (global for
-    /// moves delivered to other apps, local for our own) and keep the cursor
-    /// in sync with where it sits. `BackgroundCursor` makes those sets stick.
-    /// The screen position is queried fresh, NOT read off the event: a global
-    /// monitor's `locationInWindow` is relative to the *receiving app's*
-    /// window (unresolvable from here), so treating it as screen coordinates
-    /// put the cursor in the wrong zone on most moves — visible as a rapid
-    /// arrow/hand strobe.
-    private func installCursorMonitor() {
-        removeCursorMonitor()
-        // Drags included: they move the cursor but are NOT mouseMoved events,
-        // and a frozen (hidden) cursor must unfreeze the moment it moves.
-        let moves: NSEvent.EventTypeMask = [
-            .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
-        ]
-        let global = NSEvent.addGlobalMonitorForEvents(matching: moves) { [weak self] _ in
-            self?.handleMouseMoved()
+        onButtonHoverRef = { [weak self] label, hovering in
+            self?.buttonHovered(label, hovering: hovering)
         }
-        let local = NSEvent.addLocalMonitorForEvents(matching: moves) { [weak self] event in
-            self?.handleMouseMoved()
-            return event
-        }
-        cursorMonitors = [global, local].compactMap { $0 }
     }
 
-    /// A real mouse move: end any freeze FIRST (the real cursor must track
-    /// motion, never the stand-in), then sync as usual — which re-asserts the
-    /// right cursor in the same run-loop pass, so the swap is seamless.
-    private func handleMouseMoved() {
-        lastMouseMoveAt = CACurrentMediaTime()
-        cursorFreeze.unfreeze()
-        syncCursor()
-    }
-
-    private func removeCursorMonitor() {
-        cursorMonitors.forEach { NSEvent.removeMonitor($0) }
-        cursorMonitors = []
-        stopCursorReassertTimer()
-    }
-
-    /// The region where the hand cursor applies: the panel frame minus the
-    /// transparent shadow padding — just the visible glass. Clicks in the
-    /// padding fall through to the app behind, so the cursor should match.
-    private var cursorRect: NSRect {
-        panel.frame.insetBy(dx: Self.shadowPad, dy: Self.shadowPad)
-    }
-
-    /// Keep the cursor truthful around the bar with standard hover semantics:
-    /// pointing-hand over the action buttons, plain arrow over the rest of the
-    /// glass, and the app behind's own cursor once it leaves (arrow restored
-    /// exactly once on exit). Over the bar the cursor is always *asserted*,
-    /// never left alone — the active app keeps re-setting its own cursor
-    /// (e.g. a terminal's I-beam) on every move it receives, and ours must
-    /// land on top.
-    private func syncCursor() {
-        let point = NSEvent.mouseLocation
-        guard panel.isVisible, cursorRect.contains(point) else {
-            stopCursorReassertTimer()
-            cursorFreeze.unfreeze()
-            if cursorIsOverBar {
-                cursorIsOverBar = false
-                NSCursor.arrow.set()
-            }
-            if hoveredButton != nil {
-                hoveredButton = nil
-                tooltip.hide()
-            }
-            return
-        }
-        cursorIsOverBar = true
-        // Frozen at rest: the stand-in owns the pixels; nothing to maintain
-        // until a move (handleMouseMoved) or an exit unfreezes.
-        if cursorFreeze.isFrozen { return }
-        let local = barPoint(point)
-        let hovered = model.buttons.first { $0.frame.contains(local) }
-        let cursor: NSCursor = hovered != nil ? .pointingHand : .arrow
-        cursor.set()
-        updateTooltip(hovered)
-        if CACurrentMediaTime() - lastMouseMoveAt > Self.freezeAfter {
-            // At rest: swap to the stand-in and stop burning the timer — the
-            // app behind can now stomp the (hidden) cursor without effect.
-            cursorFreeze.freeze(cursor, at: point)
-            stopCursorReassertTimer()
-            return
-        }
-        startCursorReassertTimer()
-    }
-
-    /// Show/swap/hide the hover tip when the hovered button changes. Stays
-    /// quiet while an option popover is open — the tip would sit on top of it.
-    private func updateTooltip(_ hovered: BarButtonInfo?) {
-        guard hovered?.label != hoveredButton else { return }
-        hoveredButton = hovered?.label
-        guard let hovered, !holdRevealed else {
+    /// Hover reported by a bar control: show its tip on enter, hide it on
+    /// exit. SwiftUI's tracking works fine on a non-activating panel — only
+    /// forcing the cursor image from a background app didn't (see the class
+    /// note). Stays quiet while an option popover is open — the tip would sit
+    /// on top of it.
+    private func buttonHovered(_ label: String, hovering: Bool) {
+        if hovering {
+            hoveredButton = label
+            guard !holdRevealed,
+                  let button = model.buttons.first(where: { $0.label == label }) else { return }
+            tooltip.request(text: label, pointingAt: screenRect(of: button.frame))
+        } else if hoveredButton == label {
+            // Guarded: moving between buttons can report the next enter
+            // before this exit, and that fresher tip must survive.
+            hoveredButton = nil
             tooltip.hide()
-            return
         }
-        tooltip.request(text: hovered.label, pointingAt: screenRect(of: hovered.frame))
     }
 
     /// A view-reported (SwiftUI top-left) frame in screen coordinates.
@@ -268,29 +162,6 @@ final class FloatingBarPanel {
             width: rect.width,
             height: rect.height
         )
-    }
-
-    /// Convert a screen point into the bar content's SwiftUI space (top-left
-    /// origin, spans the whole window), where the button frames are reported.
-    private func barPoint(_ screenPoint: NSPoint) -> CGPoint {
-        let frame = panel.frame
-        return CGPoint(
-            x: screenPoint.x - frame.origin.x,
-            y: frame.height - (screenPoint.y - frame.origin.y)
-        )
-    }
-
-    private func startCursorReassertTimer() {
-        guard cursorReassertTimer == nil else { return }
-        cursorReassertTimer = Timer.scheduledTimer(withTimeInterval: Self.cursorReassertInterval, repeats: true) { [weak self] timer in
-            guard let self else { timer.invalidate(); return }
-            self.syncCursor()
-        }
-    }
-
-    private func stopCursorReassertTimer() {
-        cursorReassertTimer?.invalidate()
-        cursorReassertTimer = nil
     }
 
     var isVisible: Bool { featureVisible }
@@ -313,24 +184,16 @@ final class FloatingBarPanel {
         revealed = true
         panel.setFrame(NSRect(origin: shownOrigin(), size: size), display: true)
         panel.orderFrontRegardless()
-        // Tag on the NEXT run-loop turn: window-server state set in the same
-        // turn a window is ordered in can get dropped, and AppKit may rewrite
-        // tags on re-order — so re-apply on every show.
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.windowTagged = BackgroundCursor.tagWindow(self.panel)
-        }
         refreshTracking()
         evaluate(animated: false)
-        syncCursor() // the bar may have appeared under a stationary cursor
     }
 
     func hide() {
         featureVisible = false
         stopTracking()
+        hoveredButton = nil
         tooltip.hide()
         panel.orderOut(nil)
-        syncCursor() // hidden now — restores the arrow if the bar owned the cursor
     }
 
     /// Turn Dock-style auto-hide on/off. Off restores the always-visible bar.
@@ -396,6 +259,12 @@ final class FloatingBarPanel {
     private func setRevealed(_ value: Bool, animated: Bool) {
         guard value != revealed else { return }
         revealed = value
+        if !value {
+            // Retracting slides the buttons out from under a possibly
+            // stationary cursor — tracking may never fire an exit for that.
+            hoveredButton = nil
+            tooltip.hide()
+        }
 
         let targetX = (value ? shownOrigin() : hiddenOrigin()).x
         if animated {
@@ -403,7 +272,6 @@ final class FloatingBarPanel {
         } else {
             slideTimer?.invalidate(); slideTimer = nil
             panel.setFrameOrigin(NSPoint(x: targetX, y: shownOrigin().y))
-            syncCursor() // the bar may have jumped under (or away from) a stationary cursor
         }
     }
 
@@ -428,12 +296,7 @@ final class FloatingBarPanel {
             let p = min(1, (CACurrentMediaTime() - start) / Self.slideDuration)
             let eased = 1 - pow(1 - p, 3) // easeOutCubic
             self.panel.setFrameOrigin(NSPoint(x: startX + dx * eased, y: y))
-            if p >= 1 {
-                timer.invalidate(); self.slideTimer = nil
-                // A reveal can slide the bar in under a stationary cursor (no
-                // mouse-move fires); retracts self-correct via the reassert timer.
-                self.syncCursor()
-            }
+            if p >= 1 { timer.invalidate(); self.slideTimer = nil }
         }
     }
 
@@ -473,21 +336,20 @@ final class FloatingBarPanel {
 // MARK: - SwiftUI content
 
 final class FloatingBarModel: ObservableObject {
-    @Published var isHovering = false
     /// True while translatable text is selected somewhere — drives the subtle
     /// "ready to translate" accent on the Translate action.
     @Published var hasSelection = false
     /// The action buttons' labels + frames (content SwiftUI space, top-left
-    /// origin), written by the view's layout and read by the panel's cursor
-    /// sync. Deliberately not `@Published` — no view reads it, and it must be
-    /// capturable before the view exists (a callback wired after init loses
-    /// the one-and-only preference fire for these static frames).
+    /// origin), written by the view's layout and read by the panel to anchor
+    /// each button's hover tip. Deliberately not `@Published` — no view reads
+    /// it, and it must be capturable before the view exists (a callback wired
+    /// after init loses the one-and-only preference fire for these static
+    /// frames).
     var buttons: [BarButtonInfo] = []
 }
 
 /// A bar button's label and frame (in `FloatingBarView.spaceName` space),
-/// reported to the panel so it can scope the hand cursor to the actual
-/// controls and anchor each one's hover tip.
+/// reported to the panel so it can anchor each control's hover tip.
 struct BarButtonInfo: Equatable {
     let label: String
     let frame: CGRect
@@ -501,9 +363,8 @@ private struct BarButtonFramesKey: PreferenceKey {
 }
 
 private extension View {
-    /// Report this control's frame + label so the panel scopes the hand
-    /// cursor to it and anchors its hover tip — what makes a bar control
-    /// *feel* like a button. Anything clickable in the bar must opt in.
+    /// Report this control's frame + label so the panel can anchor its hover
+    /// tip. Anything clickable in the bar must opt in.
     func reportsAsBarButton(_ label: String) -> some View {
         background(GeometryReader { geo in
             Color.clear.preference(
@@ -511,6 +372,19 @@ private extension View {
                 value: [BarButtonInfo(label: label, frame: geo.frame(in: .named(FloatingBarView.spaceName)))]
             )
         })
+    }
+
+    /// Pointing hand via the public pointer-style API (macOS 15+). Honored
+    /// whenever macOS grants this app cursor authority; it has no effect
+    /// while another app is active — that's the platform contract, and the
+    /// hover ring + tip carry the affordance there.
+    @ViewBuilder
+    func linkPointer() -> some View {
+        if #available(macOS 15.0, *) {
+            pointerStyle(.link)
+        } else {
+            self
+        }
     }
 }
 
@@ -520,30 +394,32 @@ struct FloatingBarView: View {
     var onTranslate: () -> Void = {}
     var onImprove: () -> Void = {}
     var onListen: () -> Void = {}
+    /// A control's hover changed (label, entered/exited) — drives the panel's
+    /// hover tip.
+    var onButtonHover: (String, Bool) -> Void = { _, _ in }
     /// Coordinate space covering the whole bar content including the shadow
     /// padding — window coordinates by construction.
     static let spaceName = "bar"
 
     private var stack: some View {
         VStack(spacing: 5) {
-            // Same affordances as every other bar control (hover ring, hand
-            // cursor, tip) — without them the brand icon didn't read as
-            // clickable at all.
-            BrandButton(action: onOpenApp)
+            // Same affordances as every other bar control (hover ring, tip) —
+            // without them the brand icon didn't read as clickable at all.
+            BrandButton(action: onOpenApp, onHoverChange: onButtonHover)
                 .padding(.bottom, 1)
 
             // Translate, Improve and Listen all act on the selection, so they light
             // up when there's text to work with. Capture (OCR) doesn't depend on it.
-            BarButton(system: "character.bubble", help: "Translate selection", isActive: model.hasSelection) {
+            BarButton(system: "character.bubble", help: "Translate selection", isActive: model.hasSelection, onHoverChange: onButtonHover) {
                 onTranslate()
             }
-            BarButton(system: "text.badge.checkmark", help: "Improve copy", isActive: model.hasSelection) {
+            BarButton(system: "text.badge.checkmark", help: "Improve copy", isActive: model.hasSelection, onHoverChange: onButtonHover) {
                 onImprove()
             }
-            BarButton(system: "speaker.wave.2", help: "Listen", isActive: model.hasSelection) {
+            BarButton(system: "speaker.wave.2", help: "Listen", isActive: model.hasSelection, onHoverChange: onButtonHover) {
                 onListen()
             }
-            BarButton(system: "text.viewfinder", help: "Capture text") {
+            BarButton(system: "text.viewfinder", help: "Capture text", onHoverChange: onButtonHover) {
                 // TODO: screenshot + Vision OCR
             }
         }
@@ -564,9 +440,9 @@ struct FloatingBarView: View {
             // only one) lands somewhere the panel can read.
             .onPreferenceChange(BarButtonFramesKey.self) { [model] in model.buttons = $0 }
         // Full opacity for a clean, native glass look — staying out of the way
-        // is handled by auto-hide, not by fading the bar. No hover tracking at
-        // this level either: the cursor is owned by FloatingBarPanel.syncCursor,
-        // and extra per-move SwiftUI tracking made fast in-bar movement laggy.
+        // is handled by auto-hide, not by fading the bar. No whole-bar hover
+        // tracking: per-move work at this level made fast in-bar movement
+        // laggy; each button tracks its own hover instead.
     }
 
     /// Native Liquid Glass on macOS 26+ (a single Dock-like capsule slab that
@@ -601,6 +477,7 @@ private struct BarButton: View {
     let system: String
     let help: String
     var isActive: Bool = false
+    var onHoverChange: (String, Bool) -> Void = { _, _ in }
     let action: () -> Void
     @State private var isHover = false
 
@@ -620,10 +497,11 @@ private struct BarButton: View {
                 .background(Circle().fill(fillColor))
         }
         .buttonStyle(.plain)
-        // Highlight only — the hand cursor is owned by FloatingBarPanel.syncCursor,
-        // and the custom hover tip replaces the native .help tag.
-        .onHover { isHover = $0 }
+        // Ring highlight + hover report; the custom hover tip replaces the
+        // native .help tag.
+        .onHover { isHover = $0; onHoverChange(help, $0) }
         .reportsAsBarButton(help)
+        .linkPointer()
         .animation(.easeOut(duration: 0.18), value: isActive)
     }
 }
@@ -633,7 +511,10 @@ private struct BarButton: View {
 /// as `BarButton`, so it reads as clickable like the rest of the column.
 private struct BrandButton: View {
     let action: () -> Void
+    var onHoverChange: (String, Bool) -> Void = { _, _ in }
     @State private var isHover = false
+
+    private static let label = "Open Talkeo"
 
     var body: some View {
         Button(action: action) {
@@ -644,8 +525,9 @@ private struct BrandButton: View {
                 .background(Circle().fill(isHover ? Color.primary.opacity(0.10) : Color.clear))
         }
         .buttonStyle(.plain)
-        .onHover { isHover = $0 }
-        .reportsAsBarButton("Open Talkeo")
+        .onHover { isHover = $0; onHoverChange(Self.label, $0) }
+        .reportsAsBarButton(Self.label)
+        .linkPointer()
     }
 }
 
