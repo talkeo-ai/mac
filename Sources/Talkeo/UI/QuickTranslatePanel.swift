@@ -48,6 +48,11 @@ final class QuickTranslatePanel {
     /// that window can open to a specific section.
     var onOpenFullHistory: (() -> Void)?
 
+    /// "Full history" tapped in Listen's compose view. Same shape as
+    /// `onOpenFullHistory` but a separate hook — Listen's history lives in its
+    /// own store and (eventually) its own app page, not Translate's.
+    var onOpenFullListenHistory: (() -> Void)?
+
     /// Fires with `true` when the popover comes on screen and `false` once it
     /// leaves, whatever the path (dismiss click, close button, Replace). The
     /// owner uses it to hold the floating bar revealed while we're open.
@@ -94,12 +99,14 @@ final class QuickTranslatePanel {
         var onCloseRef: (() -> Void)?
         var onReplaceRef: ((String) -> Void)?
         var onOpenFullHistoryRef: (() -> Void)?
+        var onOpenFullListenHistoryRef: (() -> Void)?
         let view = QuickTranslateView(
             model: model,
             onResize: { onResizeRef?($0) },
             onClose: { onCloseRef?() },
             onReplace: { onReplaceRef?($0) },
-            onOpenFullHistory: { onOpenFullHistoryRef?() }
+            onOpenFullHistory: { onOpenFullHistoryRef?() },
+            onOpenFullListenHistory: { onOpenFullListenHistoryRef?() }
         )
         let hosting = FirstMouseHostingView(rootView: view)
         hosting.frame = NSRect(origin: .zero, size: NSSize(width: Self.width, height: Self.nominalHeight))
@@ -110,6 +117,7 @@ final class QuickTranslatePanel {
         onCloseRef = { [weak self] in self?.hide() }
         onReplaceRef = { [weak self] text in self?.performReplace(text) }
         onOpenFullHistoryRef = { [weak self] in self?.onOpenFullHistory?() }
+        onOpenFullListenHistoryRef = { [weak self] in self?.onOpenFullListenHistory?() }
     }
 
     func show(text: String) {
@@ -376,9 +384,6 @@ final class QuickTranslateModel: ObservableObject {
     @Published var mode: Mode = .translate
     @Published var historyEntries: [HistoryEntry] = []
 
-    /// Listen's own history (separate store — no target text to show). Loaded
-    /// by `showListenHistory()`.
-    @Published var listenHistoryEntries: [ListenHistoryEntry] = []
     /// True while Listen shows the compose/history view instead of the
     /// playback transport. Kept distinct from `sourceText.isEmpty` on purpose:
     /// `SelectableText` reports every keystroke through `sourceText`, so using
@@ -582,10 +587,12 @@ final class QuickTranslateModel: ObservableObject {
         playFull()
     }
 
-    /// Switch Listen into its compose/history view (Listen tapped with nothing
-    /// selected): an empty, editable text box plus recent entries. Mirrors
-    /// `showHistory()`, but keeps `mode == .listen` — `listenComposing` is what
-    /// picks the compose view over the playback transport.
+    /// Switch Listen into its compose view (Listen tapped with nothing
+    /// selected): an empty, editable text box. Mirrors `showHistory()`, but
+    /// keeps `mode == .listen` — `listenComposing` is what picks the compose
+    /// view over the playback transport. Entries still accumulate in
+    /// `listenHistory` (for the eventual Full History page); the popover
+    /// itself doesn't list them inline — "Full history" is where they live.
     func showListenHistory() {
         task?.cancel()
         clearSelection()
@@ -594,7 +601,6 @@ final class QuickTranslateModel: ObservableObject {
         sourceText = ""
         mode = .listen
         listenComposing = true
-        listenHistoryEntries = listenHistory.all()
     }
 
     /// Save the text locally so it can be replayed later. Recorded eagerly (on
@@ -610,16 +616,6 @@ final class QuickTranslateModel: ObservableObject {
             detectedLang: detectedLang,
             timestamp: Date()
         ))
-    }
-
-    func deleteListenHistory(_ entry: ListenHistoryEntry) {
-        listenHistory.remove(id: entry.id)
-        listenHistoryEntries = listenHistory.all()
-    }
-
-    func clearListenHistory() {
-        listenHistory.clear()
-        listenHistoryEntries = []
     }
 
     /// Load + play the whole text through the real TTS voice.
@@ -1009,6 +1005,10 @@ struct QuickTranslateView: View {
     var onReplace: (String) -> Void = { _ in }
     /// "Full history" tapped — open the main app's History/Transcript screen.
     var onOpenFullHistory: () -> Void = {}
+    /// "Full history" tapped from Listen's compose view — Listen's own
+    /// history, not Translate's (see `onOpenFullListenHistory` on the panel).
+    var onOpenFullListenHistory: () -> Void = {}
+    @State private var listenVoiceMock: String = QuickTranslateView.mockVoices[0]
     @State private var sourceHeight: CGFloat = QuickTranslateView.textBoxMinHeight
     @State private var targetHeight: CGFloat = QuickTranslateView.textBoxMinHeight
     /// Measured natural height of the improve correction card, so it scrolls
@@ -1037,6 +1037,9 @@ struct QuickTranslateView: View {
     /// Older ones live in the main app's History screen, reached via
     /// `fullHistoryLink`.
     private static let recentHistoryCount = 5
+    /// Placeholder voice names for Listen's voice picker — UI mockup only, not
+    /// wired to `TTSAudioPlayer` yet (there's a single voice today).
+    private static let mockVoices = ["Aria", "Nova", "Ember"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1454,8 +1457,8 @@ struct QuickTranslateView: View {
     }
 
     /// Listen tapped with nothing selected: an empty, editable box (type or
-    /// paste text to hear it) plus recent entries — same shape as Translate's
-    /// History mode.
+    /// paste text to hear it) plus an action row — no inline recent list
+    /// (that lives behind "Full history" instead, once the app page exists).
     @ViewBuilder
     private var listenComposeSection: some View {
         HStack {
@@ -1474,11 +1477,7 @@ struct QuickTranslateView: View {
                 minHeight: QuickTranslateView.textBoxMinHeight,
                 isEditable: true,
                 onTextChange: { model.sourceText = $0 },
-                onCommit: {
-                    let trimmed = model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty else { return }
-                    model.listen(trimmed)
-                }
+                onCommit: commitListenCompose
             ) { _, _ in }
             .frame(height: sourceHeight)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1492,21 +1491,85 @@ struct QuickTranslateView: View {
         }
         .cardChrome()
 
-        if !model.listenHistoryEntries.isEmpty {
-            Divider().overlay(Palette.border).opacity(0.5)
-            cardLabel("Recent")
-
-            let recent = Array(model.listenHistoryEntries.prefix(QuickTranslateView.recentHistoryCount))
-            VStack(spacing: 0) {
-                ForEach(recent) { entry in
-                    ListenHistoryRow(
-                        entry: entry,
-                        onOpen: { model.listen(entry.text) },
-                        onDelete: { model.deleteListenHistory(entry) }
-                    )
+        HStack(spacing: 10) {
+            // Goes to the app's Listen history (no inline list here — mirrors
+            // Improve's compose row: history lives in the app, not the popover).
+            Button(action: onOpenFullListenHistory) {
+                HStack(spacing: 4) {
+                    Text("Full history")
+                        .font(.system(size: 12, weight: .medium))
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 10, weight: .semibold))
                 }
+                .foregroundStyle(Palette.muted)
             }
+            .buttonStyle(.plain)
+            .handCursor()
+
+            Spacer()
+
+            listenVoicePicker
+
+            let hasText = !model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            Button(action: commitListenCompose) {
+                HStack(spacing: 6) {
+                    Text("Listen")
+                        .font(.system(size: 13, weight: .semibold))
+                    // Return-key hint: pressing Return in the box above does
+                    // the same thing as tapping this button.
+                    Text("⏎")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.white.opacity(0.18)))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(Capsule().fill(Color.accentColor))
+                // `.disabled` alone wouldn't dim a custom-styled button (no
+                // standard control to read `isEnabled`) — match the pattern
+                // `ListenTransport.stop` uses and fade it explicitly.
+                .opacity(hasText ? 1 : 0.4)
+            }
+            .buttonStyle(.plain)
+            .disabled(!hasText)
+            .handCursor()
         }
+        .padding(.top, 2)
+    }
+
+    /// Voice picker — UI mockup only (see `mockVoices`); doesn't affect
+    /// playback yet.
+    private var listenVoicePicker: some View {
+        Menu {
+            ForEach(QuickTranslateView.mockVoices, id: \.self) { voice in
+                Button(voice) { listenVoiceMock = voice }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 10, weight: .medium))
+                Text(listenVoiceMock)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(Palette.muted)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Palette.elevated.opacity(0.6)))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .handCursor()
+    }
+
+    /// Shared by the compose box's Return-to-commit and the explicit Listen
+    /// button — same trim-guard-play the rest of the panel's compose flows use.
+    private func commitListenCompose() {
+        let trimmed = model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        model.listen(trimmed)
     }
 
     /// A text is loaded: the karaoke-highlighted pane, the transport, and
@@ -2588,53 +2651,6 @@ private struct HistoryRow: View {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
         return formatter.localizedString(for: date, relativeTo: Date())
-    }
-}
-
-/// Same shape as `HistoryRow`, minus the `source → target` pair — a Listen
-/// entry has no translation, just the text that was spoken.
-private struct ListenHistoryRow: View {
-    let entry: ListenHistoryEntry
-    let onOpen: () -> Void
-    let onDelete: () -> Void
-    @State private var hover = false
-
-    var body: some View {
-        Button(action: onOpen) {
-            Text(entry.text)
-                .foregroundColor(Palette.muted)
-                .font(.system(size: 13))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .padding(.vertical, 7)
-                .padding(.horizontal, 4)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(hover ? Palette.elevated.opacity(0.3) : Color.clear)
-                )
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .handCursor()
-        .help(HistoryRow.relative(entry.timestamp))
-        .overlay(alignment: .trailing) {
-            if hover {
-                Button(action: onDelete) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Palette.muted)
-                        .frame(width: 18, height: 18)
-                        .background(Circle().fill(Palette.elevated))
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .help("Remove")
-                .handCursor()
-                .padding(.trailing, 2)
-            }
-        }
-        .onHover { hover = $0 }
     }
 }
 
