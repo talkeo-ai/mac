@@ -359,7 +359,6 @@ private struct CapturePreviewView: View {
                         .stroke(Palette.border, lineWidth: 1)
                 )
                 .frame(maxWidth: .infinity, alignment: .center)
-            statusHint
             actionRow
         }
         .padding(16)
@@ -397,64 +396,57 @@ private struct CapturePreviewView: View {
 
     private var actionRow: some View {
         HStack(spacing: 8) {
-            Spacer()
+            statusHint
+            Spacer(minLength: 12)
             QuickIconButton(system: "doc.on.doc") { onCopy() }
                 .disabled(model.phase != .ready)
                 .opacity(model.phase == .ready ? 1 : 0.4)
-            // Same glyphs as the floating bar's buttons — the verbs are the
-            // same actions, just fed from the capture instead of a selection.
-            verbButton("Translate", system: "character.bubble") { onVerb(.translate) }
-            verbButton("Improve", system: "text.badge.checkmark") { onVerb(.improve) }
-            verbButton("Listen", system: "speaker.wave.2") { onVerb(.listen) }
+            verbButton("Translate") { onVerb(.translate) }
+            verbButton("Improve") { onVerb(.improve) }
+            verbButton("Listen") { onVerb(.listen) }
         }
     }
 
-    /// One quiet line teaching what the verbs will act on (the popover's
-    /// `selectHint` pattern). Present in every phase so the layout never
-    /// jumps when recognition lands or a selection starts.
+    /// Quiet caption at the row's far left telling the user what the verbs
+    /// will act on. Present in every phase so the row never jumps when
+    /// recognition lands or a selection starts.
     @ViewBuilder
     private var statusHint: some View {
-        HStack(spacing: 5) {
+        Group {
             switch model.phase {
             case .recognizing:
                 Text("Reading text…")
             case .noText:
-                Text("No text found in the capture")
+                Text("No text found")
             case .ready:
-                Image(systemName: "character.cursor.ibeam")
-                    .font(.system(size: 10, weight: .medium))
                 if model.hasSelection {
                     Text("Acting on your selection")
                 } else {
-                    Text("Select text in the image to act on just that part")
+                    Text("Select text to act on just that part")
                 }
             }
         }
-        .font(.system(size: 11))
+        .font(.system(size: 10.5))
         .foregroundStyle(Palette.tertiary)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .lineLimit(1)
     }
 
     @ViewBuilder
-    private func verbButton(_ title: String, system: String, action: @escaping () -> Void) -> some View {
+    private func verbButton(_ title: String, action: @escaping () -> Void) -> some View {
         let enabled = model.phase == .ready
         Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: system)
-                    .font(.system(size: 11, weight: .semibold))
-                Text(title)
-                    .font(.system(size: 12.5, weight: .semibold))
-            }
-            .foregroundStyle(enabled ? Palette.primaryForeground : Palette.tertiary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            // Same muted-not-faded disabled treatment as the popover's
-            // compose CTAs (`.disabled` alone renders nothing on a
-            // custom-styled button).
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(enabled ? Palette.primary : Palette.elevated)
-            )
+            Text(title)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(enabled ? Palette.primaryForeground : Palette.tertiary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                // Same muted-not-faded disabled treatment as the popover's
+                // compose CTAs (`.disabled` alone renders nothing on a
+                // custom-styled button).
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(enabled ? Palette.primary : Palette.elevated)
+                )
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
