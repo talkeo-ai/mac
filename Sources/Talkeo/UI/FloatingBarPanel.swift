@@ -38,6 +38,11 @@ final class FloatingBarPanel {
     /// and opens the listen (TTS) panel.
     var onListen: (() -> Void)?
 
+    /// Invoked when the user taps Capture. The owner runs the interactive
+    /// screenshot flow (this bar hides itself while the system UI is up, but
+    /// that's the owner's call — it knows whether the bar was visible).
+    var onCapture: (() -> Void)?
+
     /// Panel size, derived from the SwiftUI content's fitting size so the window
     /// hugs the pill exactly (no vertical slack that could shift centering). The
     /// content carries symmetric padding for the shadow, included here.
@@ -88,6 +93,7 @@ final class FloatingBarPanel {
         var onTranslateRef: (() -> Void)?
         var onImproveRef: (() -> Void)?
         var onListenRef: (() -> Void)?
+        var onCaptureRef: (() -> Void)?
         var onButtonHoverRef: ((String, Bool) -> Void)?
         let view = FloatingBarView(
             model: model,
@@ -95,6 +101,7 @@ final class FloatingBarPanel {
             onTranslate: { onTranslateRef?() },
             onImprove: { onImproveRef?() },
             onListen: { onListenRef?() },
+            onCapture: { onCaptureRef?() },
             onButtonHover: { onButtonHoverRef?($0, $1) }
         )
         let hosting = NSHostingView(rootView: view)
@@ -129,6 +136,7 @@ final class FloatingBarPanel {
         onTranslateRef = { [weak self] in self?.tooltip.hide(); self?.onTranslate?() }
         onImproveRef = { [weak self] in self?.tooltip.hide(); self?.onImprove?() }
         onListenRef = { [weak self] in self?.tooltip.hide(); self?.onListen?() }
+        onCaptureRef = { [weak self] in self?.tooltip.hide(); self?.onCapture?() }
         onButtonHoverRef = { [weak self] label, hovering in
             self?.buttonHovered(label, hovering: hovering)
         }
@@ -394,6 +402,7 @@ struct FloatingBarView: View {
     var onTranslate: () -> Void = {}
     var onImprove: () -> Void = {}
     var onListen: () -> Void = {}
+    var onCapture: () -> Void = {}
     /// A control's hover changed (label, entered/exited) — drives the panel's
     /// hover tip.
     var onButtonHover: (String, Bool) -> Void = { _, _ in }
@@ -419,8 +428,8 @@ struct FloatingBarView: View {
             BarButton(system: "speaker.wave.2", help: "Listen", isActive: model.hasSelection, onHoverChange: onButtonHover) {
                 onListen()
             }
-            BarButton(system: "text.viewfinder", help: "Capture text", onHoverChange: onButtonHover) {
-                // TODO: screenshot + Vision OCR
+            BarButton(system: "camera.viewfinder", help: "Capture", onHoverChange: onButtonHover) {
+                onCapture()
             }
         }
         .padding(.vertical, 9)
