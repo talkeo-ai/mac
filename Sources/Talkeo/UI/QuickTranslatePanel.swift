@@ -130,7 +130,7 @@ final class QuickTranslatePanel {
         // left floating over the main window (its dismiss monitor only sees
         // clicks on OTHER apps, so it wouldn't go away on its own).
         onOpenImproveHistoryRef = { [weak self] in
-            self?.hide()
+            self?.hide(restoringFocus: false)
             self?.onOpenImproveHistory?()
         }
         // Same reasoning as Improve above: hand-off into our own app, not a

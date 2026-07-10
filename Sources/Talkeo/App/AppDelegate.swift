@@ -33,9 +33,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // "Full history" in the popover opens the app's Translate view with its
         // history drawer open.
         quickTranslate.onOpenFullHistory = { [weak self] in self?.mainWindow.openTranslateHistory() }
-        // "History" in Improve's compose opens the app's Improve view (past
-        // rewrites live there, not in the popover).
-        quickTranslate.onOpenImproveHistory = { [weak self] in self?.mainWindow.show(section: .improve) }
+        // "Full history" in Improve's compose opens the app's Improve view
+        // with its history drawer open (past rewrites live there, not in the
+        // popover) — same deep-link shape as Translate's.
+        quickTranslate.onOpenImproveHistory = { [weak self] in self?.mainWindow.openImproveHistory() }
         // "Full history" in Listen's compose opens the app's Listen view with
         // its history drawer open (past listens live there, not the popover).
         quickTranslate.onOpenFullListenHistory = { [weak self] in self?.mainWindow.openListenHistory() }
