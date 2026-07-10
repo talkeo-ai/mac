@@ -1572,6 +1572,8 @@ struct QuickTranslateView: View {
             listenVoicePicker
 
             let hasText = !model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            // Same muted-not-faded disabled treatment as Improve's compose CTA.
+            let ctaText = hasText ? Palette.primaryForeground : Palette.tertiary
             Button(action: commitListenCompose) {
                 HStack(spacing: 6) {
                     Text("Listen")
@@ -1580,19 +1582,20 @@ struct QuickTranslateView: View {
                     // the same thing as tapping this button.
                     Text("⏎")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Palette.primaryForeground.opacity(0.75))
+                        .foregroundStyle(ctaText.opacity(0.75))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Palette.primaryForeground.opacity(0.18)))
+                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(ctaText.opacity(0.18)))
                 }
-                .foregroundStyle(Palette.primaryForeground)
+                .foregroundStyle(ctaText)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
-                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.primary))
-                // `.disabled` alone wouldn't dim a custom-styled button (no
-                // standard control to read `isEnabled`) — match the pattern
-                // `ListenTransport.stop` uses and fade it explicitly.
-                .opacity(hasText ? 1 : 0.4)
+                // `.disabled` alone wouldn't render a disabled look on a
+                // custom-styled button (no standard control to read
+                // `isEnabled`) — swap to the muted surface explicitly, the
+                // same treatment as Improve's compose CTA.
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(hasText ? Palette.primary : Palette.elevated))
             }
             .buttonStyle(.plain)
             .disabled(!hasText)
@@ -1785,6 +1788,9 @@ struct QuickTranslateView: View {
     /// does the same). Same row language as Listen's compose.
     private var improveComposeBar: some View {
         let hasText = !model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // Disabled reads muted, not faded: tertiary label on the secondary
+        // surface, matching how native controls gray out.
+        let ctaText = hasText ? Palette.primaryForeground : Palette.tertiary
         return HStack(spacing: 10) {
             // Goes to the app's Improve history (no inline list here — the
             // popover stays a quick compose surface).
@@ -1810,18 +1816,19 @@ struct QuickTranslateView: View {
                     // the same thing as tapping this button.
                     Text("⏎")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Palette.primaryForeground.opacity(0.75))
+                        .foregroundStyle(ctaText.opacity(0.75))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Palette.primaryForeground.opacity(0.18)))
+                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(ctaText.opacity(0.18)))
                 }
-                .foregroundStyle(Palette.primaryForeground)
+                .foregroundStyle(ctaText)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
-                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.primary))
-                // `.disabled` alone wouldn't dim a custom-styled button (no
-                // standard control to read `isEnabled`) — fade it explicitly.
-                .opacity(hasText ? 1 : 0.4)
+                // `.disabled` alone wouldn't render a disabled look on a
+                // custom-styled button (no standard control to read
+                // `isEnabled`) — swap to the muted surface explicitly.
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(hasText ? Palette.primary : Palette.elevated))
             }
             .buttonStyle(.plain)
             .disabled(!hasText)
