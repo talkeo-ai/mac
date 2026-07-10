@@ -7,31 +7,30 @@ import SwiftUI
 /// of a second output pane. Lives beside the popover's own Listen card in
 /// UI/ — the two surfaces share the playback engine (`TTSAudioPlayer`) and
 /// the transport view (`ListenPlaybackControls`), not the rest of their view
-/// code. Picking is Listen's own (a single `selectedRange`, not the shared
-/// multi-term `ExplainSession` Translate/Improve use) — Listen only ever
-/// jumps a playhead, it never explains a term.
+/// code.
 
 /// State for the in-app listener. Mirrors the popover's Listen flow (detect
-/// language, load + play the real voice, record history, tap-a-word-to-jump)
-/// but owns its own compose/playback split rather than reusing
-/// `QuickTranslateModel`'s — this page has no translate/improve modes to
-/// coordinate with. Owned by `MainWindowModel` so switching sections doesn't
-/// stop playback or lose the compose text.
+/// language, load + play the real voice, record history) but owns its own
+/// compose/playback split rather than reusing `QuickTranslateModel`'s — this
+/// page has no translate/improve modes to coordinate with. Owned by
+/// `MainWindowModel` so switching sections doesn't stop playback or lose the
+/// compose text.
 final class ListenPageModel: ObservableObject {
     @Published var sourceText = ""
     @Published private(set) var detectedLang: String = "EN"
     /// True while showing the empty, editable compose box; false once a text
-    /// is loaded/playing (read-only, tap-to-jump). Same split as the popover's
-    /// `listenComposing`, and for the same reason: the box's meaning (typing
-    /// vs. tapping a word to seek) genuinely changes between the two states.
+    /// is loaded/playing (read-only). Same split as the popover's
+    /// `listenComposing`, and for the same reason: the box's meaning changes
+    /// between the two states.
     @Published var composing: Bool = true
     @Published var speechRate: QuickTranslateModel.SpeechRate = .normal
     @Published private(set) var entries: [ListenHistoryEntry] = []
     @Published var historyOpen = false
-    /// The single word/phrase currently picked, if any (mirrors the popover):
-    /// tapping a different one replaces it, tapping the same one clears it.
-    /// Shown as a highlight on the waveform, not a separate row — one player.
-    @Published var selectedRange: NSRange?
+    /// The trimmed region of the clip, if the user has enabled trim mode on
+    /// the waveform (fractions 0...1; `nil` = off). Reset whenever a new text
+    /// loads. `ListenPlaybackControls` is the sole place that syncs this onto
+    /// `TTSAudioPlayer`'s playback window — this model only mutates its own copy.
+    @Published var listenTrimRange: ClosedRange<Double>?
 
     private let history: ListenHistoryStore
 
@@ -44,8 +43,7 @@ final class ListenPageModel: ObservableObject {
     func play(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        selectedRange = nil
-        TTSAudioPlayer.shared.setPlaybackWindow(nil) // stale window from a previous text doesn't carry over
+        listenTrimRange = nil // stale trim from a previous text doesn't carry over
         sourceText = trimmed
         detectedLang = QuickTranslateModel.detectLanguage(trimmed)
         composing = false
@@ -58,57 +56,18 @@ final class ListenPageModel: ObservableObject {
     /// silently under the box the user is about to type into.
     func newListen() {
         TTSAudioPlayer.shared.stop()
-        selectedRange = nil
+        listenTrimRange = nil
         sourceText = ""
         composing = true
     }
 
     /// Replay a history entry straight into the player (no re-typing).
     func select(_ entry: ListenHistoryEntry) {
-        selectedRange = nil
-        TTSAudioPlayer.shared.setPlaybackWindow(nil)
+        listenTrimRange = nil
         sourceText = entry.text
         detectedLang = entry.detectedLang
         composing = false
         TTSAudioPlayer.shared.load(sourceText, lang: detectedLang, rate: speechRate.value)
-    }
-
-    /// The user tapped a word/phrase: pick it and play just that part, like a
-    /// video editor's in/out selection — reaching its end rewinds to its
-    /// start instead of continuing into the rest of the clip. Tapping the
-    /// exact same span again clears the pick and returns to the whole clip.
-    func pick(term: String, range: NSRange) {
-        guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        if let current = selectedRange, NSEqualRanges(current, range) {
-            clearSelection()
-            return
-        }
-        selectedRange = range
-        playSelection(range)
-    }
-
-    /// Return to playing the whole clip, un-confined.
-    func clearSelection() {
-        selectedRange = nil
-        TTSAudioPlayer.shared.setPlaybackWindow(nil)
-    }
-
-    /// Confine playback to `range` and start playing it from its start
-    /// (loading the clip first if it isn't ready yet).
-    private func playSelection(_ range: NSRange) {
-        let length = (sourceText as NSString).length
-        guard length > 0 else { return }
-        let start = Double(range.location) / Double(length)
-        let end = Double(NSMaxRange(range)) / Double(length)
-        guard end > start else { return }
-        let player = TTSAudioPlayer.shared
-        player.setPlaybackWindow(start...end)
-        if player.hasAudio(sourceText) {
-            player.seek(toFraction: start)
-            player.resume()
-        } else {
-            player.load(sourceText, lang: detectedLang, rate: speechRate.value, fromFraction: start)
-        }
     }
 
     func refreshHistory() { entries = history.all() }
@@ -246,11 +205,7 @@ struct ListenPage: View {
 
     private var playbackArea: some View {
         VStack(alignment: .leading, spacing: 16) {
-            ListenPlaybackPane(
-                text: model.sourceText,
-                selectionOutline: model.selectedRange,
-                onPick: { model.pick(term: $0, range: $1) }
-            )
+            ListenPlaybackPane(text: model.sourceText)
                 .frame(height: 160)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 14)
@@ -267,59 +222,25 @@ struct ListenPage: View {
                 text: model.sourceText,
                 detectedLang: model.detectedLang,
                 speechRate: $model.speechRate,
-                selectedRange: model.selectedRange
+                trimRange: $model.listenTrimRange
             )
-
-            if model.selectedRange == nil {
-                HStack(spacing: 5) {
-                    Image(systemName: "hand.tap")
-                        .font(.system(size: 10, weight: .medium))
-                    Text("Tap a word or phrase to play just that part")
-                        .font(.system(size: 11))
-                }
-                .foregroundStyle(Palette.tertiary)
-                .frame(maxWidth: .infinity, alignment: .center)
-            } else {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 10, weight: .medium))
-                    Text("Playing just this part")
-                        .font(.system(size: 11))
-                    Button(action: model.clearSelection) {
-                        HStack(spacing: 3) {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 10, weight: .medium))
-                            Text("Clear")
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
-                .foregroundStyle(Palette.tertiary)
-                .frame(maxWidth: .infinity, alignment: .center)
-            }
         }
     }
 }
 
 /// The Listen text, in its own subview so it can observe the spoken word (a
 /// few updates per second) and highlight it karaoke-style without
-/// re-rendering the whole page on every progress tick. Tapping a word jumps
-/// the playhead there.
+/// re-rendering the whole page on every progress tick. Read-only display —
+/// selecting a portion to loop happens on the waveform now, not the text.
 private struct ListenPlaybackPane: View {
     let text: String
-    let selectionOutline: NSRange?
-    let onPick: (String, NSRange) -> Void
     @ObservedObject private var spoken = TTSAudioPlayer.shared.spoken
 
     var body: some View {
         PlainTextEditor(
             text: .constant(text),
             isEditable: false,
-            onWordSelect: onPick,
-            spokenRange: spoken.range,
-            selectionOutline: selectionOutline,
-            picksOnPlainClick: true
+            spokenRange: spoken.range
         )
     }
 }

@@ -445,11 +445,12 @@ final class QuickTranslateModel: ObservableObject {
     /// instant the compose box stopped being empty.
     @Published var listenComposing: Bool = false
 
-    /// The single word/phrase currently picked in the Listen card (jumps the
-    /// playhead there). Deliberately just one range, not a list: tapping a
-    /// different word replaces it, tapping the same one clears it. Shown as
-    /// a highlight on the waveform itself — no separate picked-term row.
-    @Published var listenSelection: NSRange?
+    /// The trimmed region of the Listen clip, if the user has enabled trim
+    /// mode on the waveform (fractions 0...1; `nil` = off, full clip plays
+    /// normally). Reset whenever a new text loads. `ListenPlaybackControls`
+    /// is the sole place that syncs this onto `TTSAudioPlayer`'s playback
+    /// window — this model only ever mutates its own copy.
+    @Published var listenTrimRange: ClosedRange<Double>?
 
     /// Playback speed for the Listen card. These feed `AVAudioPlayer.rate` (the
     /// cloud-voice player), where 1.0 is normal speed — so the values are the
@@ -632,14 +633,12 @@ final class QuickTranslateModel: ObservableObject {
 
     // MARK: Listen (TTS playback + select-to-hear)
 
-    /// Open the Listen card for `text`: show it, detect its language, and load the
-    /// real Talkeo voice (auto-plays once ready). Selecting a word later jumps the
-    /// playhead to it in the same clip.
+    /// Open the Listen card for `text`: show it, detect its language, and load
+    /// the real Talkeo voice (auto-plays once ready).
     func listen(_ text: String) {
         task?.cancel()
         clearSelection()
-        listenSelection = nil
-        TTSAudioPlayer.shared.setPlaybackWindow(nil) // stale window from a previous text doesn't carry over
+        listenTrimRange = nil // stale trim from a previous text doesn't carry over
         // Animated: mirrors `translate(_:)`, so leaving the compose/history view
         // for a playing clip transitions instead of popping.
         withAnimation(.easeInOut(duration: 0.22)) {
@@ -663,7 +662,7 @@ final class QuickTranslateModel: ObservableObject {
     func showListenHistory() {
         task?.cancel()
         clearSelection()
-        listenSelection = nil
+        listenTrimRange = nil
         TTSAudioPlayer.shared.stop() // don't leave a clip playing under the compose view
         sourceEditing = false
         sourceText = ""
@@ -689,44 +688,6 @@ final class QuickTranslateModel: ObservableObject {
     /// Load + play the whole text through the real TTS voice.
     func playFull() {
         TTSAudioPlayer.shared.load(sourceText, lang: detectedLang, rate: speechRate.value)
-    }
-
-    /// The user tapped a word/phrase: pick it and play just that part, like a
-    /// video editor's in/out selection — reaching its end rewinds to its
-    /// start instead of continuing into the rest of the clip. Tapping the
-    /// exact same span again clears the pick and returns to the whole clip.
-    func pickListen(term: String, range: NSRange) {
-        guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        if let current = listenSelection, NSEqualRanges(current, range) {
-            clearListenSelection()
-            return
-        }
-        listenSelection = range
-        playListenSelection(range)
-    }
-
-    /// Return to playing the whole clip, un-confined.
-    func clearListenSelection() {
-        listenSelection = nil
-        TTSAudioPlayer.shared.setPlaybackWindow(nil)
-    }
-
-    /// Confine playback to `range` and start playing it from its start
-    /// (loading the clip first if it isn't ready yet).
-    private func playListenSelection(_ range: NSRange) {
-        let length = (sourceText as NSString).length
-        guard length > 0 else { return }
-        let start = Double(range.location) / Double(length)
-        let end = Double(NSMaxRange(range)) / Double(length)
-        guard end > start else { return }
-        let player = TTSAudioPlayer.shared
-        player.setPlaybackWindow(start...end)
-        if player.hasAudio(sourceText) {
-            player.seek(toFraction: start)
-            player.resume()
-        } else {
-            player.load(sourceText, lang: detectedLang, rate: speechRate.value, fromFraction: start)
-        }
     }
 
     // MARK: Improve (native/natural rewrite)
@@ -1714,9 +1675,7 @@ struct QuickTranslateView: View {
         model.listen(trimmed)
     }
 
-    /// A text is loaded: the karaoke-highlighted pane and the transport. The
-    /// picked word (if any) is marked right on the transport's waveform —
-    /// there's no separate row/player for it.
+    /// A text is loaded: the karaoke-highlighted pane and the transport.
     @ViewBuilder
     private var listenPlaybackSection: some View {
         HStack {
@@ -1726,29 +1685,21 @@ struct QuickTranslateView: View {
         }
         .frame(height: 26)
 
-        // The text — tap a word to jump the playhead there; the word being
-        // spoken is highlighted as it plays (its own observing subview, so it
-        // refreshes per word, not on the 60 fps progress ticks).
+        // The text — the word being spoken is highlighted as it plays (its
+        // own observing subview, so it refreshes per word, not on the 60 fps
+        // progress ticks).
         ListenTextPane(model: model, height: $sourceHeight)
             .cardChrome()
 
-        // Transport: waveform (marked with the pick, if any), play/pause,
-        // ±5s skip, and speed — shared with the app page's Listen view.
+        // Transport: waveform (with its own trim toggle + draggable in/out
+        // handles), play/pause, ±5s skip, and speed — shared with the app
+        // page's Listen view.
         ListenPlaybackControls(
             text: model.sourceText,
             detectedLang: model.detectedLang,
             speechRate: $model.speechRate,
-            selectedRange: model.listenSelection
+            trimRange: $model.listenTrimRange
         )
-
-        // Discoverability, same spirit as Translate's `selectHint`: the
-        // no-selection hint, or — once something's picked — a status line
-        // with an explicit, easy way back to playing the whole clip.
-        if model.listenSelection == nil {
-            listenHint
-        } else {
-            listenSelectionStatus
-        }
     }
 
     /// Consistent close-button chrome — matches `sourceCardSection`'s (26×26
@@ -1765,43 +1716,6 @@ struct QuickTranslateView: View {
         .buttonStyle(.plain)
         .handCursor()
     }
-
-    private var listenHint: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "hand.tap")
-                .font(.system(size: 10, weight: .medium))
-            Text("Tap a word or phrase to play just that part")
-                .font(.system(size: 11))
-        }
-        .foregroundStyle(Palette.tertiary)
-        .frame(maxWidth: .infinity, alignment: .center)
-    }
-
-    /// Shown once a word/phrase is picked: names what's happening (playback
-    /// is confined to it, like a video editor's in/out points) and gives an
-    /// explicit, one-tap way back to the whole clip — not just the "tap the
-    /// same word again" gesture, which isn't obvious on its own.
-    private var listenSelectionStatus: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 10, weight: .medium))
-            Text("Playing just this part")
-                .font(.system(size: 11))
-            Button(action: model.clearListenSelection) {
-                HStack(spacing: 3) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 10, weight: .medium))
-                    Text("Clear")
-                        .font(.system(size: 11, weight: .medium))
-                }
-            }
-            .buttonStyle(.plain)
-            .handCursor()
-        }
-        .foregroundStyle(Palette.tertiary)
-        .frame(maxWidth: .infinity, alignment: .center)
-    }
-
 
     // MARK: Improve (native rewrite + compact, scannable changes)
 
@@ -2506,14 +2420,8 @@ private struct SelectableText: NSViewRepresentable {
     /// Word currently being spoken (Listen): drawn in accent on top of any picks,
     /// karaoke-style.
     var spokenRange: NSRange? = nil
-    /// The selected range (Listen): drawn as an outline, not a fill, so it
-    /// reads distinctly from `spokenRange`'s filled highlight.
-    var selectionOutline: NSRange? = nil
     /// When true the view is an editable input (no marking); Enter commits.
     var isEditable: Bool = false
-    /// Fire `onSelect` on a plain click, not just a drag-selection — Listen's
-    /// "tap any word to jump there" (see `MarkerTextView.picksOnPlainClick`).
-    var picksOnPlainClick: Bool = false
     var onTextChange: (String) -> Void = { _ in }
     var onCommit: () -> Void = {}
     var onSelect: (String, NSRange) -> Void
@@ -2608,7 +2516,6 @@ private struct SelectableText: NSViewRepresentable {
         coordinator.onSelect = onSelect
         coordinator.onTextChange = onTextChange
         coordinator.onCommit = onCommit
-        textView.picksOnPlainClick = picksOnPlainClick
 
         // Single source of truth for the container's width (see `makeNSView`).
         textView.textContainer?.containerSize = NSSize(width: max(width, 1), height: .greatestFiniteMagnitude)
@@ -2634,7 +2541,6 @@ private struct SelectableText: NSViewRepresentable {
         textView.markers = isEditable ? [] : highlights.filter { NSMaxRange($0.range) <= length }
         textView.markerColor = highlightColor
         textView.spokenMarker = (isEditable ? nil : spokenRange).flatMap { NSMaxRange($0) <= length ? $0 : nil }
-        textView.selectionOutline = (isEditable ? nil : selectionOutline).flatMap { NSMaxRange($0) <= length ? $0 : nil }
         textView.needsDisplay = true
 
         // Deterministic content height (text + width), floored and capped — past
@@ -2804,17 +2710,13 @@ private struct ListenTextPane: View {
         SelectableText(
             text: model.sourceText,
             height: $height,
-            width: QuickTranslateView.width - 32,
+            width: QuickTranslateView.cardTextWidth,
             maxHeight: 240,
             spokenRange: spoken.range,
-            selectionOutline: model.listenSelection,
             isEditable: false,
-            picksOnPlainClick: true,
             onTextChange: { _ in },
             onCommit: {}
-        ) { term, range in
-            model.pickListen(term: term, range: range)
-        }
+        ) { _, _ in }
         .frame(height: height)
         .frame(maxWidth: .infinity, alignment: .leading)
     }

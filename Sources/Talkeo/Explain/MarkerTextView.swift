@@ -5,10 +5,8 @@ import AppKit
 /// copies (`WordSelectingTextView`, `ShortcutTextView`) each half-had:
 ///
 /// - **Markers**: rounded highlights behind picked words (`markers`), an
-///   optional override fill (`markerColor`, Improve's diff tint), the
-///   karaoke marker for the word being spoken (`spokenMarker`, Listen), and
-///   Listen's selected range drawn as an outline rather than a fill
-///   (`selectionOutline`) so it stays legible under the moving spoken marker.
+///   optional override fill (`markerColor`, Improve's diff tint), and the
+///   karaoke marker for the word being spoken (`spokenMarker`, Listen).
 /// - **Pick on settle**: `mouseDown` runs AppKit's whole selection drag loop;
 ///   when it returns the selection is final and `onWordPick` fires with the
 ///   selection snapped to whole words. Read-only views then collapse the OS
@@ -30,12 +28,6 @@ final class MarkerTextView: NSTextView {
     var onWordPick: ((String, NSRange) -> Void)?
     /// Let an editable view pick words too (default: editing = caret only).
     var allowsPickWhileEditable = false
-    /// Fire `onWordPick` on a plain click (caret placement, zero-length
-    /// selection) too — not just on an actual drag-selection. Off by default:
-    /// Translate/Improve's pick-to-explain is deliberately a real selection
-    /// gesture. Listen's "tap any word to jump there" means a single click,
-    /// so its read-only pane opts in.
-    var picksOnPlainClick = false
     /// Register a selection on the first click even when the window isn't key.
     /// The popover's non-activating panel needs it; a regular window must not
     /// have it (a first click would pick words while the window is inactive).
@@ -47,10 +39,6 @@ final class MarkerTextView: NSTextView {
     var markerColor: NSColor?
     /// Word currently being spoken (Listen) — drawn in accent, karaoke-style.
     var spokenMarker: NSRange?
-    /// The selected range (Listen): drawn as an outline, not a fill — reads
-    /// distinctly from `spokenMarker`'s filled highlight even when they cover
-    /// the same span (right after picking, before playback moves on).
-    var selectionOutline: NSRange?
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { acceptsFirstMouseEnabled }
 
@@ -67,15 +55,9 @@ final class MarkerTextView: NSTextView {
     private func reportPick() {
         guard let onWordPick, !isEditable || allowsPickWhileEditable else { return }
         let raw = selectedRange()
+        guard raw.length > 0 else { return }
         let ns = string as NSString
-        let snapped: NSRange
-        if raw.length > 0 {
-            snapped = snapWords(raw, in: ns)
-        } else if picksOnPlainClick {
-            snapped = wordAt(raw.location, in: ns)
-        } else {
-            return
-        }
+        let snapped = snapWords(raw, in: ns)
         guard snapped.length > 0 else { return }
         onWordPick(ns.substring(with: snapped), snapped)
         if !isEditable {
@@ -107,7 +89,6 @@ final class MarkerTextView: NSTextView {
 
     override func draw(_ dirtyRect: NSRect) {
         drawMarkers()
-        drawSelectionOutline()
         drawSpokenMarker()
         super.draw(dirtyRect)
     }
@@ -137,28 +118,6 @@ final class MarkerTextView: NSTextView {
                 fill.setFill()
                 NSBezierPath(roundedRect: frame, xRadius: 6, yRadius: 6).fill()
             }
-        }
-    }
-
-    /// The selected range's boundary — a stroked outline, not a fill, so a
-    /// pick and the spoken-word highlight covering the same span still read
-    /// as two different things.
-    private func drawSelectionOutline() {
-        guard let selectionOutline, selectionOutline.length > 0,
-              NSMaxRange(selectionOutline) <= (string as NSString).length,
-              let lm = layoutManager, let tc = textContainer else { return }
-        let origin = textContainerOrigin
-        let glyphRange = lm.glyphRange(forCharacterRange: selectionOutline, actualCharacterRange: nil)
-        lm.enumerateEnclosingRects(
-            forGlyphRange: glyphRange,
-            withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
-            in: tc
-        ) { rect, _ in
-            let frame = rect.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: -3, dy: -1)
-            let path = NSBezierPath(roundedRect: frame, xRadius: 7, yRadius: 7)
-            path.lineWidth = 1.5
-            Palette.nsForeground.withAlphaComponent(0.45).setStroke()
-            path.stroke()
         }
     }
 
@@ -198,27 +157,6 @@ func snapWords(_ range: NSRange, in ns: NSString) -> NSRange {
     }
     guard first != -1 else { return empty }
     var start = first, end = last + 1
-    while start > 0, isWord(start - 1) { start -= 1 }
-    while end < ns.length, isWord(end) { end += 1 }
-    return NSRange(location: start, length: end - start)
-}
-
-/// The whole word touching a caret position (a plain click has no selection
-/// length, just an insertion point sitting between two characters) — checks
-/// the character right at `index` and, if that's not a word char, the one
-/// just before it (a caret at the end of a word still counts as touching it).
-func wordAt(_ index: Int, in ns: NSString) -> NSRange {
-    let empty = NSRange(location: index, length: 0)
-    guard index >= 0, index <= ns.length else { return empty }
-    let wordSet = CharacterSet.alphanumerics
-    func isWord(_ i: Int) -> Bool {
-        guard i >= 0, i < ns.length, let s = UnicodeScalar(ns.character(at: i)) else { return false }
-        return wordSet.contains(s) || s == "'" || s == "’"
-    }
-    var i = index
-    if !isWord(i), isWord(i - 1) { i -= 1 }
-    guard isWord(i) else { return empty }
-    var start = i, end = i + 1
     while start > 0, isWord(start - 1) { start -= 1 }
     while end < ns.length, isWord(end) { end += 1 }
     return NSRange(location: start, length: end - start)
