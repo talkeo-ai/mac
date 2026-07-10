@@ -64,10 +64,12 @@ final class CapturePreviewPanel {
         panel.hasShadow = false // the SwiftUI chrome draws its own
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        // The chrome's shadow padding doubles as a drag handle; the overlay
-        // consumes drags over text (that's selection), so moving the window
-        // happens from the margins.
-        panel.isMovableByWindowBackground = true
+        // NOT movable-by-background: AppKit asks the clicked view's
+        // `mouseDownCanMoveWindow`, and the Live Text overlay's internals
+        // default to true (non-opaque views) — a drag meant to SELECT text
+        // would move the window instead. The preview is placed centered and
+        // stays put.
+        panel.isMovableByWindowBackground = false
         self.panel = panel
         panel.onCancel = { [weak self] in self?.hide() }
     }
@@ -192,6 +194,10 @@ final class CapturePreviewPanel {
                 self.model.apply(analysis)
             } catch {
                 guard !Task.isCancelled else { return }
+                // Diagnosable: a thrown analyzer looks identical to "no Live
+                // Text" from the outside, and the Vision fallback masks it.
+                NSLog("Capture: ImageAnalyzer failed, falling back to Vision: %@",
+                      String(describing: error))
                 self.fallBackToVision(image)
             }
         }
@@ -280,6 +286,14 @@ final class CapturePreviewModel: ObservableObject {
 
     func apply(_ analysis: ImageAnalysis) {
         self.analysis = analysis
+        // Attach directly: the overlay registered during the panel's initial
+        // layout (before the analysis could possibly land), and relying on a
+        // SwiftUI update pass here is fragile — the representable's stored
+        // properties are the same references before and after, so SwiftUI
+        // may well skip `updateNSView` entirely.
+        if let overlay = overlayView {
+            MainActor.assumeIsolated { overlay.analysis = analysis }
+        }
         setTranscript(analysis.transcript)
     }
 
