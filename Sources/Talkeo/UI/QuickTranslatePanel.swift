@@ -1580,15 +1580,15 @@ struct QuickTranslateView: View {
                     // the same thing as tapping this button.
                     Text("⏎")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(Palette.primaryForeground.opacity(0.75))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.white.opacity(0.18)))
+                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Palette.primaryForeground.opacity(0.18)))
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(Palette.primaryForeground)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
-                .background(Capsule().fill(Color.accentColor))
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.primary))
                 // `.disabled` alone wouldn't dim a custom-styled button (no
                 // standard control to read `isEnabled`) — match the pattern
                 // `ListenTransport.stop` uses and fade it explicitly.
@@ -1810,15 +1810,15 @@ struct QuickTranslateView: View {
                     // the same thing as tapping this button.
                     Text("⏎")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(Palette.primaryForeground.opacity(0.75))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.white.opacity(0.18)))
+                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Palette.primaryForeground.opacity(0.18)))
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(Palette.primaryForeground)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
-                .background(Capsule().fill(Color.accentColor))
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.primary))
                 // `.disabled` alone wouldn't dim a custom-styled button (no
                 // standard control to read `isEnabled`) — fade it explicitly.
                 .opacity(hasText ? 1 : 0.4)
@@ -2139,10 +2139,10 @@ struct QuickTranslateView: View {
                             .font(.system(size: 12, weight: .semibold))
                         Text(copyOnly ? "Copy" : "Replace").font(.system(size: 13, weight: .semibold))
                     }
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Palette.primaryForeground)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
-                    .background(Capsule().fill(Color.accentColor))
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.primary))
                 }
                 .buttonStyle(.plain)
                 .disabled(!ready)
