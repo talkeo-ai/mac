@@ -119,6 +119,14 @@ final class CapturePreviewPanel {
         // window too, yanking the user out of their context (see the same
         // note in QuickTranslatePanel.present()).
         panel.makeKey()
+        // SwiftUI hands initial key focus to the first focusable control —
+        // the ✕ button gets a focus ring nobody asked for. Nothing needs
+        // keyboard focus up front (Esc works from the window itself), so
+        // drop it; deferred a turn because SwiftUI assigns focus after the
+        // window becomes key.
+        DispatchQueue.main.async { [weak panel] in
+            panel?.makeFirstResponder(nil)
+        }
 
         analyze(image)
     }
@@ -268,6 +276,11 @@ final class CapturePreviewModel: ObservableObject {
     }
 
     @Published var phase: Phase = .recognizing
+    /// Whether a Live Text selection is active in the image right now —
+    /// drives the hint that tells the user what the verbs will act on.
+    /// Only ever flips on macOS 14+ (the selection-change delegate callback
+    /// is 14+, same as reading the selection itself).
+    @Published var hasSelection = false
     /// Full recognized text (analyzer transcript or Vision fallback).
     private(set) var transcript: String?
     /// VisionKit analysis, attached to the overlay by the representable on
@@ -279,6 +292,7 @@ final class CapturePreviewModel: ObservableObject {
 
     func reset() {
         phase = .recognizing
+        hasSelection = false
         transcript = nil
         analysis = nil
         overlayView = nil
@@ -345,6 +359,7 @@ private struct CapturePreviewView: View {
                         .stroke(Palette.border, lineWidth: 1)
                 )
                 .frame(maxWidth: .infinity, alignment: .center)
+            statusHint
             actionRow
         }
         .padding(16)
@@ -382,51 +397,64 @@ private struct CapturePreviewView: View {
 
     private var actionRow: some View {
         HStack(spacing: 8) {
-            statusHint
             Spacer()
             QuickIconButton(system: "doc.on.doc") { onCopy() }
                 .disabled(model.phase != .ready)
                 .opacity(model.phase == .ready ? 1 : 0.4)
-            verbButton("Translate") { onVerb(.translate) }
-            verbButton("Improve") { onVerb(.improve) }
-            verbButton("Listen") { onVerb(.listen) }
+            // Same glyphs as the floating bar's buttons — the verbs are the
+            // same actions, just fed from the capture instead of a selection.
+            verbButton("Translate", system: "character.bubble") { onVerb(.translate) }
+            verbButton("Improve", system: "text.badge.checkmark") { onVerb(.improve) }
+            verbButton("Listen", system: "speaker.wave.2") { onVerb(.listen) }
         }
     }
 
-    /// What the verbs will act on / why they're disabled. Present from the
-    /// start so the row's height never jumps when recognition lands.
+    /// One quiet line teaching what the verbs will act on (the popover's
+    /// `selectHint` pattern). Present in every phase so the layout never
+    /// jumps when recognition lands or a selection starts.
     @ViewBuilder
     private var statusHint: some View {
-        switch model.phase {
-        case .recognizing:
-            Text("Reading text…")
-                .font(.system(size: 11))
-                .foregroundStyle(Palette.tertiary)
-        case .noText:
-            Text("No text found")
-                .font(.system(size: 11))
-                .foregroundStyle(Palette.tertiary)
-        case .ready:
-            EmptyView()
+        HStack(spacing: 5) {
+            switch model.phase {
+            case .recognizing:
+                Text("Reading text…")
+            case .noText:
+                Text("No text found in the capture")
+            case .ready:
+                Image(systemName: "character.cursor.ibeam")
+                    .font(.system(size: 10, weight: .medium))
+                if model.hasSelection {
+                    Text("Acting on your selection")
+                } else {
+                    Text("Select text in the image to act on just that part")
+                }
+            }
         }
+        .font(.system(size: 11))
+        .foregroundStyle(Palette.tertiary)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
-    private func verbButton(_ title: String, action: @escaping () -> Void) -> some View {
+    private func verbButton(_ title: String, system: String, action: @escaping () -> Void) -> some View {
         let enabled = model.phase == .ready
         Button(action: action) {
-            Text(title)
-                .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(enabled ? Palette.primaryForeground : Palette.tertiary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                // Same muted-not-faded disabled treatment as the popover's
-                // compose CTAs (`.disabled` alone renders nothing on a
-                // custom-styled button).
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(enabled ? Palette.primary : Palette.elevated)
-                )
+            HStack(spacing: 5) {
+                Image(systemName: system)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 12.5, weight: .semibold))
+            }
+            .foregroundStyle(enabled ? Palette.primaryForeground : Palette.tertiary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            // Same muted-not-faded disabled treatment as the popover's
+            // compose CTAs (`.disabled` alone renders nothing on a
+            // custom-styled button).
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(enabled ? Palette.primary : Palette.elevated)
+            )
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -440,6 +468,27 @@ private struct LiveTextImageView: NSViewRepresentable {
     let image: NSImage
     let model: CapturePreviewModel
 
+    func makeCoordinator() -> Coordinator {
+        Coordinator(model: model)
+    }
+
+    /// Forwards the overlay's selection changes into the model so the hint
+    /// can say what the verbs will act on. The callback is macOS 14+ — on 13
+    /// the hint just never switches to "your selection", consistent with
+    /// verbs acting on the full transcript there.
+    final class Coordinator: NSObject, ImageAnalysisOverlayViewDelegate {
+        private let model: CapturePreviewModel
+
+        init(model: CapturePreviewModel) {
+            self.model = model
+        }
+
+        @available(macOS 14.0, *)
+        func textSelectionDidChange(_ overlayView: ImageAnalysisOverlayView) {
+            model.hasSelection = overlayView.hasActiveTextSelection
+        }
+    }
+
     func makeNSView(context: Context) -> NSView {
         let container = NSView()
         let imageView = NSImageView()
@@ -452,6 +501,7 @@ private struct LiveTextImageView: NSViewRepresentable {
 
         let overlay = ImageAnalysisOverlayView()
         overlay.preferredInteractionTypes = [.textSelection]
+        overlay.delegate = context.coordinator
         // Our verb row replaces the system's Live Text pill — two competing
         // affordances in one small panel is one too many.
         overlay.isSupplementaryInterfaceHidden = true
