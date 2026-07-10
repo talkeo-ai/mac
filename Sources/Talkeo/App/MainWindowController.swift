@@ -151,7 +151,7 @@ enum MainSection: String, CaseIterable, Identifiable {
         case .translate: return "character.bubble.fill"
         case .improve: return "text.badge.checkmark"
         case .listen: return "speaker.wave.2.fill"
-        case .capture: return "text.viewfinder"
+        case .capture: return "camera.viewfinder"
         case .transcript: return "waveform"
         case .englishLevel: return "chart.bar.fill"
         case .settings: return "gearshape.fill"

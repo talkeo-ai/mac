@@ -294,8 +294,13 @@ final class CapturePreviewModel: ObservableObject {
     /// can make an in-image selection but verbs act on the full transcript.
     func actionText() -> String? {
         var selected: String?
-        if #available(macOS 14.0, *), overlayView?.hasActiveTextSelection == true {
-            selected = overlayView?.selectedText
+        if #available(macOS 14.0, *), let overlay = overlayView {
+            // Verb clicks arrive on main; the overlay's members are
+            // MainActor-isolated and VisionKit enforces it even in this
+            // language mode, hence the explicit assume.
+            selected = MainActor.assumeIsolated {
+                overlay.hasActiveTextSelection ? overlay.selectedText : nil
+            }
         }
         return CaptureActionText.resolve(selected: selected, transcript: transcript)
     }
