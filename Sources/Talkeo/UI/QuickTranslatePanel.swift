@@ -445,6 +445,12 @@ final class QuickTranslateModel: ObservableObject {
     /// instant the compose box stopped being empty.
     @Published var listenComposing: Bool = false
 
+    /// The single word/phrase currently picked in the Listen card (jumps the
+    /// playhead there). Deliberately just one range, not a list: tapping a
+    /// different word replaces it, tapping the same one clears it. Shown as
+    /// a highlight on the waveform itself — no separate picked-term row.
+    @Published var listenSelection: NSRange?
+
     /// Playback speed for the Listen card. These feed `AVAudioPlayer.rate` (the
     /// cloud-voice player), where 1.0 is normal speed — so the values are the
     /// literal multipliers the labels advertise (0.75×/1×/1.25×).
@@ -517,6 +523,12 @@ final class QuickTranslateModel: ObservableObject {
     /// highlight the selected words.
     func highlights(for pane: Pane) -> [(range: NSRange, active: Bool)] {
         session.highlights(for: pane)
+    }
+
+    /// Listen's own marker — a single range, not the shared multi-term
+    /// session (Listen doesn't page between picks anymore).
+    var listenHighlights: [(range: NSRange, active: Bool)] {
+        listenSelection.map { [($0, true)] } ?? []
     }
 
     /// The language shown in a pane: the detected one on top, the translation
@@ -631,6 +643,7 @@ final class QuickTranslateModel: ObservableObject {
     func listen(_ text: String) {
         task?.cancel()
         clearSelection()
+        listenSelection = nil
         // Animated: mirrors `translate(_:)`, so leaving the compose/history view
         // for a playing clip transitions instead of popping.
         withAnimation(.easeInOut(duration: 0.22)) {
@@ -654,6 +667,7 @@ final class QuickTranslateModel: ObservableObject {
     func showListenHistory() {
         task?.cancel()
         clearSelection()
+        listenSelection = nil
         TTSAudioPlayer.shared.stop() // don't leave a clip playing under the compose view
         sourceEditing = false
         sourceText = ""
@@ -681,25 +695,17 @@ final class QuickTranslateModel: ObservableObject {
         TTSAudioPlayer.shared.load(sourceText, lang: detectedLang, rate: speechRate.value)
     }
 
-    /// The user selected a word/phrase: mark it, focus it, and jump the playhead
-    /// to it in the buffered clip (instant — no extra synthesis). No explanations
-    /// — the session just marks (`loadCard: false`).
+    /// The user tapped a word/phrase: pick it and jump the playhead to it in
+    /// the buffered clip (instant — no extra synthesis). Tapping the exact
+    /// same span again clears the pick instead of re-picking it.
     func pickListen(term: String, range: NSRange) {
-        let item = ExplainTerm(text: term, sentence: sourceText, sourceLang: detectedLang, targetLang: detectedLang, pane: .source, range: range)
-        session.pick(item, loadCard: false)
         guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if let current = listenSelection, NSEqualRanges(current, range) {
+            listenSelection = nil
+            return
+        }
+        listenSelection = range
         seekToWord(range)
-    }
-
-    /// Page between selected words and jump the playhead to each.
-    func stepListen(by delta: Int) {
-        session.step(by: delta, loadCard: false)
-        if let term = activeTerm { seekToWord(term.range) }
-    }
-
-    /// Drop the focused selected word, focusing a neighbour.
-    func removeActiveListen() {
-        session.removeActive()
     }
 
     /// Jump the buffered clip to where `range` starts in the text. Loads the clip
@@ -1700,8 +1706,9 @@ struct QuickTranslateView: View {
         model.listen(trimmed)
     }
 
-    /// A text is loaded: the karaoke-highlighted pane, the transport, and
-    /// (once a word's been picked) its pager footer.
+    /// A text is loaded: the karaoke-highlighted pane and the transport. The
+    /// picked word (if any) is marked right on the transport's waveform —
+    /// there's no separate row/player for it.
     @ViewBuilder
     private var listenPlaybackSection: some View {
         HStack {
@@ -1717,39 +1724,19 @@ struct QuickTranslateView: View {
         ListenTextPane(model: model, height: $sourceHeight)
             .cardChrome()
 
-        // Transport: waveform, play/pause, ±5s skip, and speed — shared with
-        // the app page's Listen view.
-        ListenPlaybackControls(text: model.sourceText, detectedLang: model.detectedLang, speechRate: $model.speechRate)
+        // Transport: waveform (marked with the pick, if any), play/pause,
+        // ±5s skip, and speed — shared with the app page's Listen view.
+        ListenPlaybackControls(
+            text: model.sourceText,
+            detectedLang: model.detectedLang,
+            speechRate: $model.speechRate,
+            selectedRange: model.listenSelection
+        )
 
         // Make the tap-to-jump gesture discoverable, same spirit as
         // Translate's `selectHint` — only until the user's picked a word once.
-        if model.terms.isEmpty {
+        if model.listenSelection == nil {
             listenHint
-        }
-
-        // The currently-selected word: page with ‹ › (each jumps the playhead).
-        if let term = model.activeTerm {
-            Divider().overlay(Palette.border).opacity(0.6)
-            HStack(alignment: .center, spacing: 10) {
-                Text(term.text)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(Palette.foreground)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 4)
-                Button(action: { model.stepListen(by: 0) }) {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Palette.muted)
-                        .frame(width: 24, height: 24)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Jump here")
-                .handCursor()
-                if model.terms.count > 1 { listenPager }
-                removeButton { model.removeActiveListen() }
-            }
         }
     }
 
@@ -1779,24 +1766,6 @@ struct QuickTranslateView: View {
         .frame(maxWidth: .infinity, alignment: .center)
     }
 
-    /// ‹ 1/2 › pager over the selected fragments (plays each as you page).
-    private var listenPager: some View {
-        HStack(spacing: 8) {
-            Button(action: { model.stepListen(by: -1) }) {
-                Image(systemName: "chevron.left").font(.system(size: 11, weight: .bold))
-            }
-            .buttonStyle(.plain)
-            Text("\((model.activeTermIndex ?? 0) + 1) / \(model.terms.count)")
-                .font(.system(size: 11, weight: .medium))
-                .monospacedDigit()
-            Button(action: { model.stepListen(by: 1) }) {
-                Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold))
-            }
-            .buttonStyle(.plain)
-        }
-        .foregroundStyle(Palette.muted)
-        .handCursor()
-    }
 
     // MARK: Improve (native rewrite + compact, scannable changes)
 
@@ -2797,7 +2766,7 @@ private struct ListenTextPane: View {
             height: $height,
             width: QuickTranslateView.width - 32,
             maxHeight: 240,
-            highlights: model.highlights(for: .source),
+            highlights: model.listenHighlights,
             spokenRange: spoken.range,
             isEditable: false,
             picksOnPlainClick: true,

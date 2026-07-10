@@ -6,7 +6,10 @@ import SwiftUI
 /// listens — the same shape as `TranslatePage`, adapted for playback instead
 /// of a second output pane. Lives beside the popover's own Listen card in
 /// UI/ — the two surfaces share the playback engine (`TTSAudioPlayer`) and
-/// the picking engine (`ExplainSession`), not their view code.
+/// the transport view (`ListenPlaybackControls`), not the rest of their view
+/// code. Picking is Listen's own (a single `selectedRange`, not the shared
+/// multi-term `ExplainSession` Translate/Improve use) — Listen only ever
+/// jumps a playhead, it never explains a term.
 
 /// State for the in-app listener. Mirrors the popover's Listen flow (detect
 /// language, load + play the real voice, record history, tap-a-word-to-jump)
@@ -25,31 +28,27 @@ final class ListenPageModel: ObservableObject {
     @Published var speechRate: QuickTranslateModel.SpeechRate = .normal
     @Published private(set) var entries: [ListenHistoryEntry] = []
     @Published var historyOpen = false
-
-    /// Select-to-hear: picked words are marked and jump the playhead, no vocab
-    /// card is loaded (`loadCard: false` throughout) — same engine the
-    /// popover's Listen card and the app's translator both use.
-    let session: ExplainSession
+    /// The single word/phrase currently picked, if any (mirrors the popover):
+    /// tapping a different one replaces it, tapping the same one clears it.
+    /// Shown as a highlight on the waveform, not a separate row — one player.
+    @Published var selectedRange: NSRange?
 
     private let history: ListenHistoryStore
 
-    init(client: TransformClient = TalkeoTransformClient(), history: ListenHistoryStore = LocalListenHistoryStore.shared) {
+    init(history: ListenHistoryStore = LocalListenHistoryStore.shared) {
         self.history = history
-        self.session = ExplainSession(client: client)
     }
 
-    var activeTerm: ExplainTerm? { session.activeTerm }
-    var terms: [ExplainTerm] { session.terms }
-    var activeTermIndex: Int? { session.activeTermIndex }
-
-    var highlights: [(range: NSRange, active: Bool)] { session.highlights(for: .source) }
+    var highlights: [(range: NSRange, active: Bool)] {
+        selectedRange.map { [($0, true)] } ?? []
+    }
 
     /// Commit the compose box: detect the language, record it to history, and
     /// load + play the real voice. Mirrors the popover's `listen(_:)`.
     func play(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        session.clear()
+        selectedRange = nil
         sourceText = trimmed
         detectedLang = QuickTranslateModel.detectLanguage(trimmed)
         composing = false
@@ -62,35 +61,31 @@ final class ListenPageModel: ObservableObject {
     /// silently under the box the user is about to type into.
     func newListen() {
         TTSAudioPlayer.shared.stop()
-        session.clear()
+        selectedRange = nil
         sourceText = ""
         composing = true
     }
 
     /// Replay a history entry straight into the player (no re-typing).
     func select(_ entry: ListenHistoryEntry) {
-        session.clear()
+        selectedRange = nil
         sourceText = entry.text
         detectedLang = entry.detectedLang
         composing = false
         TTSAudioPlayer.shared.load(sourceText, lang: detectedLang, rate: speechRate.value)
     }
 
-    /// The user tapped a word in the loaded text: mark it, focus it, and jump
-    /// the playhead there in the buffered clip.
+    /// The user tapped a word in the loaded text: pick it and jump the
+    /// playhead there. Tapping the exact same span again clears the pick.
     func pick(term: String, range: NSRange) {
-        let item = ExplainTerm(text: term, sentence: sourceText, sourceLang: detectedLang, targetLang: detectedLang, pane: .source, range: range)
-        session.pick(item, loadCard: false)
         guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if let current = selectedRange, NSEqualRanges(current, range) {
+            selectedRange = nil
+            return
+        }
+        selectedRange = range
         seekToWord(range)
     }
-
-    func step(by delta: Int) {
-        session.step(by: delta, loadCard: false)
-        if let term = activeTerm { seekToWord(term.range) }
-    }
-
-    func removeActive() { session.removeActive() }
 
     private func seekToWord(_ range: NSRange) {
         let length = (sourceText as NSString).length
@@ -122,15 +117,6 @@ final class ListenPageModel: ObservableObject {
 /// — the same shape as `TranslatePage`'s.
 struct ListenPage: View {
     @ObservedObject var model: ListenPageModel
-    /// Observed directly: the session is its own ObservableObject and its
-    /// changes (picking/stepping through words) don't bubble through the
-    /// model, same as `TranslatePage`.
-    @ObservedObject private var session: ExplainSession
-
-    init(model: ListenPageModel) {
-        self.model = model
-        self.session = model.session
-    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -264,9 +250,14 @@ struct ListenPage: View {
                         .stroke(Palette.border, lineWidth: 1)
                 )
 
-            ListenPlaybackControls(text: model.sourceText, detectedLang: model.detectedLang, speechRate: $model.speechRate)
+            ListenPlaybackControls(
+                text: model.sourceText,
+                detectedLang: model.detectedLang,
+                speechRate: $model.speechRate,
+                selectedRange: model.selectedRange
+            )
 
-            if model.terms.isEmpty {
+            if model.selectedRange == nil {
                 HStack(spacing: 5) {
                     Image(systemName: "hand.tap")
                         .font(.system(size: 10, weight: .medium))
@@ -275,41 +266,6 @@ struct ListenPage: View {
                 }
                 .foregroundStyle(Palette.tertiary)
                 .frame(maxWidth: .infinity, alignment: .center)
-            }
-
-            if let term = model.activeTerm {
-                Divider().overlay(Palette.border).opacity(0.6)
-                HStack(alignment: .center, spacing: 10) {
-                    Text(term.text)
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(Palette.foreground)
-                        .lineLimit(2)
-                    Spacer(minLength: 4)
-                    if model.terms.count > 1 {
-                        HStack(spacing: 8) {
-                            Button(action: { model.step(by: -1) }) {
-                                Image(systemName: "chevron.left").font(.system(size: 11, weight: .bold))
-                            }
-                            .buttonStyle(.plain)
-                            Text("\((model.activeTermIndex ?? 0) + 1) / \(model.terms.count)")
-                                .font(.system(size: 11, weight: .medium))
-                                .monospacedDigit()
-                            Button(action: { model.step(by: 1) }) {
-                                Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .foregroundStyle(Palette.muted)
-                    }
-                    Button(action: model.removeActive) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Palette.muted)
-                            .frame(width: 22, height: 22)
-                            .background(Circle().fill(Palette.elevated))
-                    }
-                    .buttonStyle(.plain)
-                }
             }
         }
     }

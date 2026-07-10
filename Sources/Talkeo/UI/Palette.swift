@@ -57,4 +57,10 @@ enum Palette {
             return rgb(isDark ? 0xDEDEDE : 0x111111).withAlphaComponent(0.24)
         }
     }
+
+    /// Background wash marking a selected range on Listen's waveform —
+    /// SwiftUI-side counterpart to `marker(active:)`, same monochrome family.
+    static func selectionTint() -> Color {
+        dynamic(0x111111, 0xDEDEDE).opacity(0.16)
+    }
 }

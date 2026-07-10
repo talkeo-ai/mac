@@ -13,6 +13,10 @@ struct ListenPlaybackControls: View {
     let text: String
     let detectedLang: String
     @Binding var speechRate: QuickTranslateModel.SpeechRate
+    /// The single word/phrase currently picked in the text pane, if any —
+    /// drawn as a highlight on the waveform instead of a separate row, so
+    /// there's only ever one player on screen.
+    var selectedRange: NSRange? = nil
     @ObservedObject private var player = TTSAudioPlayer.shared
 
     private var mine: Bool { player.currentText == text }
@@ -23,6 +27,17 @@ struct ListenPlaybackControls: View {
     private var progress: Double { mine ? player.progress : 0 }
     private var duration: Double { mine ? player.duration : 0 }
     private var elapsed: Double { progress * duration }
+
+    /// The pick's span as fractions of the text (0...1), for drawing a
+    /// highlight behind the matching stretch of the waveform.
+    private var selectionSpan: (start: Double, end: Double)? {
+        guard let selectedRange else { return nil }
+        let length = (text as NSString).length
+        guard length > 0 else { return nil }
+        let start = Double(selectedRange.location) / Double(length)
+        let end = Double(NSMaxRange(selectedRange)) / Double(length)
+        return (start, end)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -73,15 +88,23 @@ struct ListenPlaybackControls: View {
             let spacing: CGFloat = 2
             let count = max(12, Int(geo.size.width / (barWidth + spacing)))
             let heights = waveformHeights(for: text, count: count)
-            HStack(alignment: .center, spacing: spacing) {
-                ForEach(0..<count, id: \.self) { i in
-                    let played = Double(i) / Double(max(count - 1, 1)) <= progress
-                    Capsule()
-                        .fill(played ? Palette.foreground : Palette.elevated)
-                        .frame(width: barWidth, height: max(3, heights[i] * 26))
+            ZStack(alignment: .leading) {
+                if let span = selectionSpan {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Palette.selectionTint())
+                        .frame(width: max(6, CGFloat(span.end - span.start) * geo.size.width), height: 30)
+                        .offset(x: CGFloat(span.start) * geo.size.width)
                 }
+                HStack(alignment: .center, spacing: spacing) {
+                    ForEach(0..<count, id: \.self) { i in
+                        let played = Double(i) / Double(max(count - 1, 1)) <= progress
+                        Capsule()
+                            .fill(played ? Palette.foreground : Palette.elevated)
+                            .frame(width: barWidth, height: max(3, heights[i] * 26))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
