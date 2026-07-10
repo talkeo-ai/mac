@@ -7,7 +7,7 @@ import SwiftUI
 /// of a second output pane. Lives beside the popover's own Listen card in
 /// UI/ — the two surfaces share the playback engine (`TTSAudioPlayer`) and
 /// the transport view (`ListenPlaybackControls`), not the rest of their view
-/// code.
+/// code. Read-only display — no picking or selection of any kind.
 
 /// State for the in-app listener. Mirrors the popover's Listen flow (detect
 /// language, load + play the real voice, record history) but owns its own
@@ -26,11 +26,6 @@ final class ListenPageModel: ObservableObject {
     @Published var speechRate: QuickTranslateModel.SpeechRate = .normal
     @Published private(set) var entries: [ListenHistoryEntry] = []
     @Published var historyOpen = false
-    /// The trimmed region of the clip, if the user has enabled trim mode on
-    /// the waveform (fractions 0...1; `nil` = off). Reset whenever a new text
-    /// loads. `ListenPlaybackControls` is the sole place that syncs this onto
-    /// `TTSAudioPlayer`'s playback window — this model only mutates its own copy.
-    @Published var listenTrimRange: ClosedRange<Double>?
 
     private let history: ListenHistoryStore
 
@@ -43,7 +38,6 @@ final class ListenPageModel: ObservableObject {
     func play(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        listenTrimRange = nil // stale trim from a previous text doesn't carry over
         sourceText = trimmed
         detectedLang = QuickTranslateModel.detectLanguage(trimmed)
         composing = false
@@ -56,14 +50,12 @@ final class ListenPageModel: ObservableObject {
     /// silently under the box the user is about to type into.
     func newListen() {
         TTSAudioPlayer.shared.stop()
-        listenTrimRange = nil
         sourceText = ""
         composing = true
     }
 
     /// Replay a history entry straight into the player (no re-typing).
     func select(_ entry: ListenHistoryEntry) {
-        listenTrimRange = nil
         sourceText = entry.text
         detectedLang = entry.detectedLang
         composing = false
@@ -221,8 +213,7 @@ struct ListenPage: View {
             ListenPlaybackControls(
                 text: model.sourceText,
                 detectedLang: model.detectedLang,
-                speechRate: $model.speechRate,
-                trimRange: $model.listenTrimRange
+                speechRate: $model.speechRate
             )
         }
     }

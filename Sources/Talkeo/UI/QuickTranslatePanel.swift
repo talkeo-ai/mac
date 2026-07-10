@@ -445,13 +445,6 @@ final class QuickTranslateModel: ObservableObject {
     /// instant the compose box stopped being empty.
     @Published var listenComposing: Bool = false
 
-    /// The trimmed region of the Listen clip, if the user has enabled trim
-    /// mode on the waveform (fractions 0...1; `nil` = off, full clip plays
-    /// normally). Reset whenever a new text loads. `ListenPlaybackControls`
-    /// is the sole place that syncs this onto `TTSAudioPlayer`'s playback
-    /// window — this model only ever mutates its own copy.
-    @Published var listenTrimRange: ClosedRange<Double>?
-
     /// Playback speed for the Listen card. These feed `AVAudioPlayer.rate` (the
     /// cloud-voice player), where 1.0 is normal speed — so the values are the
     /// literal multipliers the labels advertise (0.75×/1×/1.25×).
@@ -638,7 +631,6 @@ final class QuickTranslateModel: ObservableObject {
     func listen(_ text: String) {
         task?.cancel()
         clearSelection()
-        listenTrimRange = nil // stale trim from a previous text doesn't carry over
         // Animated: mirrors `translate(_:)`, so leaving the compose/history view
         // for a playing clip transitions instead of popping.
         withAnimation(.easeInOut(duration: 0.22)) {
@@ -662,7 +654,6 @@ final class QuickTranslateModel: ObservableObject {
     func showListenHistory() {
         task?.cancel()
         clearSelection()
-        listenTrimRange = nil
         TTSAudioPlayer.shared.stop() // don't leave a clip playing under the compose view
         sourceEditing = false
         sourceText = ""
@@ -1691,14 +1682,12 @@ struct QuickTranslateView: View {
         ListenTextPane(model: model, height: $sourceHeight)
             .cardChrome()
 
-        // Transport: waveform (with its own trim toggle + draggable in/out
-        // handles), play/pause, ±5s skip, and speed — shared with the app
-        // page's Listen view.
+        // Transport: waveform, play/pause, ±5s skip, and speed — shared with
+        // the app page's Listen view.
         ListenPlaybackControls(
             text: model.sourceText,
             detectedLang: model.detectedLang,
-            speechRate: $model.speechRate,
-            trimRange: $model.listenTrimRange
+            speechRate: $model.speechRate
         )
     }
 
