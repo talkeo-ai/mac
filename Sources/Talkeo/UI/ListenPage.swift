@@ -39,16 +39,13 @@ final class ListenPageModel: ObservableObject {
         self.history = history
     }
 
-    var highlights: [(range: NSRange, active: Bool)] {
-        selectedRange.map { [($0, true)] } ?? []
-    }
-
     /// Commit the compose box: detect the language, record it to history, and
     /// load + play the real voice. Mirrors the popover's `listen(_:)`.
     func play(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         selectedRange = nil
+        TTSAudioPlayer.shared.setPlaybackWindow(nil) // stale window from a previous text doesn't carry over
         sourceText = trimmed
         detectedLang = QuickTranslateModel.detectLanguage(trimmed)
         composing = false
@@ -69,32 +66,48 @@ final class ListenPageModel: ObservableObject {
     /// Replay a history entry straight into the player (no re-typing).
     func select(_ entry: ListenHistoryEntry) {
         selectedRange = nil
+        TTSAudioPlayer.shared.setPlaybackWindow(nil)
         sourceText = entry.text
         detectedLang = entry.detectedLang
         composing = false
         TTSAudioPlayer.shared.load(sourceText, lang: detectedLang, rate: speechRate.value)
     }
 
-    /// The user tapped a word in the loaded text: pick it and jump the
-    /// playhead there. Tapping the exact same span again clears the pick.
+    /// The user tapped a word/phrase: pick it and play just that part, like a
+    /// video editor's in/out selection — reaching its end rewinds to its
+    /// start instead of continuing into the rest of the clip. Tapping the
+    /// exact same span again clears the pick and returns to the whole clip.
     func pick(term: String, range: NSRange) {
         guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         if let current = selectedRange, NSEqualRanges(current, range) {
-            selectedRange = nil
+            clearSelection()
             return
         }
         selectedRange = range
-        seekToWord(range)
+        playSelection(range)
     }
 
-    private func seekToWord(_ range: NSRange) {
+    /// Return to playing the whole clip, un-confined.
+    func clearSelection() {
+        selectedRange = nil
+        TTSAudioPlayer.shared.setPlaybackWindow(nil)
+    }
+
+    /// Confine playback to `range` and start playing it from its start
+    /// (loading the clip first if it isn't ready yet).
+    private func playSelection(_ range: NSRange) {
         let length = (sourceText as NSString).length
-        let fraction = length > 0 ? Double(range.location) / Double(length) : 0
+        guard length > 0 else { return }
+        let start = Double(range.location) / Double(length)
+        let end = Double(NSMaxRange(range)) / Double(length)
+        guard end > start else { return }
         let player = TTSAudioPlayer.shared
+        player.setPlaybackWindow(start...end)
         if player.hasAudio(sourceText) {
-            player.seek(toFraction: fraction)
+            player.seek(toFraction: start)
+            player.resume()
         } else {
-            player.load(sourceText, lang: detectedLang, rate: speechRate.value, fromFraction: fraction)
+            player.load(sourceText, lang: detectedLang, rate: speechRate.value, fromFraction: start)
         }
     }
 
@@ -235,7 +248,7 @@ struct ListenPage: View {
         VStack(alignment: .leading, spacing: 16) {
             ListenPlaybackPane(
                 text: model.sourceText,
-                highlights: model.highlights,
+                selectionOutline: model.selectedRange,
                 onPick: { model.pick(term: $0, range: $1) }
             )
                 .frame(height: 160)
@@ -261,8 +274,26 @@ struct ListenPage: View {
                 HStack(spacing: 5) {
                     Image(systemName: "hand.tap")
                         .font(.system(size: 10, weight: .medium))
-                    Text("Tap any word to jump there")
+                    Text("Tap a word or phrase to play just that part")
                         .font(.system(size: 11))
+                }
+                .foregroundStyle(Palette.tertiary)
+                .frame(maxWidth: .infinity, alignment: .center)
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 10, weight: .medium))
+                    Text("Playing just this part")
+                        .font(.system(size: 11))
+                    Button(action: model.clearSelection) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 10, weight: .medium))
+                            Text("Clear")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
                 .foregroundStyle(Palette.tertiary)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -277,7 +308,7 @@ struct ListenPage: View {
 /// the playhead there.
 private struct ListenPlaybackPane: View {
     let text: String
-    let highlights: [(range: NSRange, active: Bool)]
+    let selectionOutline: NSRange?
     let onPick: (String, NSRange) -> Void
     @ObservedObject private var spoken = TTSAudioPlayer.shared.spoken
 
@@ -286,8 +317,8 @@ private struct ListenPlaybackPane: View {
             text: .constant(text),
             isEditable: false,
             onWordSelect: onPick,
-            markers: highlights,
             spokenRange: spoken.range,
+            selectionOutline: selectionOutline,
             picksOnPlainClick: true
         )
     }

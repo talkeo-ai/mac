@@ -1741,10 +1741,13 @@ struct QuickTranslateView: View {
             selectedRange: model.listenSelection
         )
 
-        // Make the tap-to-jump gesture discoverable, same spirit as
-        // Translate's `selectHint` — only until the user's picked a word once.
+        // Discoverability, same spirit as Translate's `selectHint`: the
+        // no-selection hint, or — once something's picked — a status line
+        // with an explicit, easy way back to playing the whole clip.
         if model.listenSelection == nil {
             listenHint
+        } else {
+            listenSelectionStatus
         }
     }
 
@@ -1767,8 +1770,33 @@ struct QuickTranslateView: View {
         HStack(spacing: 5) {
             Image(systemName: "hand.tap")
                 .font(.system(size: 10, weight: .medium))
-            Text("Tap any word to jump there")
+            Text("Tap a word or phrase to play just that part")
                 .font(.system(size: 11))
+        }
+        .foregroundStyle(Palette.tertiary)
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    /// Shown once a word/phrase is picked: names what's happening (playback
+    /// is confined to it, like a video editor's in/out points) and gives an
+    /// explicit, one-tap way back to the whole clip — not just the "tap the
+    /// same word again" gesture, which isn't obvious on its own.
+    private var listenSelectionStatus: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 10, weight: .medium))
+            Text("Playing just this part")
+                .font(.system(size: 11))
+            Button(action: model.clearListenSelection) {
+                HStack(spacing: 3) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10, weight: .medium))
+                    Text("Clear")
+                        .font(.system(size: 11, weight: .medium))
+                }
+            }
+            .buttonStyle(.plain)
+            .handCursor()
         }
         .foregroundStyle(Palette.tertiary)
         .frame(maxWidth: .infinity, alignment: .center)

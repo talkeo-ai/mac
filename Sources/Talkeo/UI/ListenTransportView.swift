@@ -88,32 +88,35 @@ struct ListenPlaybackControls: View {
             let spacing: CGFloat = 2
             let count = max(12, Int(geo.size.width / (barWidth + spacing)))
             let heights = waveformHeights(for: text, count: count)
+            let span = selectionSpan
             ZStack(alignment: .leading) {
-                if let span = selectionSpan {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Palette.selectionTint())
-                        .frame(width: max(6, CGFloat(span.end - span.start) * geo.size.width), height: 30)
-                        .offset(x: CGFloat(span.start) * geo.size.width)
-                }
                 HStack(alignment: .center, spacing: spacing) {
                     ForEach(0..<count, id: \.self) { i in
-                        let played = Double(i) / Double(max(count - 1, 1)) <= progress
+                        let frac = Double(i) / Double(max(count - 1, 1))
                         Capsule()
-                            .fill(played ? Palette.foreground : Palette.elevated)
+                            .fill(barColor(at: frac, span: span))
                             .frame(width: barWidth, height: max(3, heights[i] * 26))
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+
+                // Boundary handles — thin vertical ticks bracketing the
+                // selection, like a video editor's in/out points, rather than
+                // a translucent wash over the bars.
+                if let span {
+                    selectionHandle.offset(x: CGFloat(span.start) * geo.size.width - 1)
+                    selectionHandle.offset(x: CGFloat(span.end) * geo.size.width - 1)
+                }
             }
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         guard hasAudio else { return }
-                        player.seek(toFraction: fraction(value.location.x, geo.size.width))
+                        player.seek(toFraction: clampedFraction(value.location.x, geo.size.width, span: span))
                     }
                     .onEnded { value in
-                        let frac = fraction(value.location.x, geo.size.width)
+                        let frac = clampedFraction(value.location.x, geo.size.width, span: span)
                         if hasAudio {
                             player.seek(toFraction: frac)
                         } else if !loading {
@@ -123,11 +126,41 @@ struct ListenPlaybackControls: View {
             )
             .handCursor()
         }
-        .frame(height: 26)
+        .frame(height: 30)
+    }
+
+    /// A bar's color: inside a selection it reads bright (dimmed only by
+    /// playback), outside one it's pushed further back so the selected span
+    /// reads as the active region, video-editor style. With no selection,
+    /// just the ordinary played/unplayed contrast.
+    private func barColor(at fraction: Double, span: (start: Double, end: Double)?) -> Color {
+        let played = fraction <= progress
+        guard let span else { return played ? Palette.foreground : Palette.elevated }
+        let inSelection = fraction >= span.start && fraction <= span.end
+        if inSelection {
+            return played ? Palette.foreground : Palette.foreground.opacity(0.55)
+        }
+        return Palette.elevated.opacity(0.5)
+    }
+
+    /// One boundary tick — taller than the bars so it reads as a handle, not
+    /// another bar.
+    private var selectionHandle: some View {
+        Capsule()
+            .fill(Palette.foreground)
+            .frame(width: 2, height: 34)
     }
 
     private func fraction(_ x: CGFloat, _ width: CGFloat) -> Double {
         Double(max(0, min(1, x / max(width, 1))))
+    }
+
+    /// A drag position as a fraction, kept inside the active selection (if
+    /// any) — while a selection plays, scrubbing can't escape it either.
+    private func clampedFraction(_ x: CGFloat, _ width: CGFloat, span: (start: Double, end: Double)?) -> Double {
+        let raw = fraction(x, width)
+        guard let span else { return raw }
+        return max(span.start, min(span.end, raw))
     }
 
     // MARK: Controls
@@ -198,7 +231,11 @@ struct ListenPlaybackControls: View {
 
     private func seek(by delta: Double) {
         guard hasAudio, duration > 0 else { return }
-        player.seek(toFraction: max(0, min(1, (elapsed + delta) / duration)))
+        var target = max(0, min(1, (elapsed + delta) / duration))
+        if let span = selectionSpan {
+            target = max(span.start, min(span.end, target))
+        }
+        player.seek(toFraction: target)
     }
 
     private func primaryAction() {
