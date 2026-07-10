@@ -1345,6 +1345,7 @@ struct QuickTranslateView: View {
         }
 
         if model.mode == .history {
+            translateComposeBar
             if !model.historyEntries.isEmpty {
                 Divider().overlay(Palette.border).opacity(0.5)
                 cardLabel("Recent")
@@ -1457,9 +1458,7 @@ struct QuickTranslateView: View {
                 onTextChange: { model.sourceText = $0 },
                 onCommit: {
                     if model.mode == .history {
-                        let trimmed = model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !trimmed.isEmpty else { return }
-                        model.translate(trimmed)
+                        commitTranslateCompose()
                     } else {
                         model.commitEdit()
                     }
@@ -1478,6 +1477,54 @@ struct QuickTranslateView: View {
             }
         }
         .cardChrome()
+    }
+
+    /// Under the compose box in History: Return in the box already translates,
+    /// but the explicit CTA makes the primary action visible — same row
+    /// language as Improve's and Listen's compose bars. Just the button here:
+    /// recents and the full-history link live right below, so there's no
+    /// left-side history link like the other two.
+    private var translateComposeBar: some View {
+        let hasText = !model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // Same muted-not-faded disabled treatment as the other compose CTAs.
+        let ctaText = hasText ? Palette.primaryForeground : Palette.tertiary
+        return HStack {
+            Spacer()
+            Button(action: commitTranslateCompose) {
+                HStack(spacing: 6) {
+                    Text("Translate")
+                        .font(.system(size: 13, weight: .semibold))
+                    // Return-key hint: pressing Return in the box above does
+                    // the same thing as tapping this button.
+                    Text("⏎")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(ctaText.opacity(0.75))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(ctaText.opacity(0.18)))
+                }
+                .foregroundStyle(ctaText)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                // `.disabled` alone wouldn't render a disabled look on a
+                // custom-styled button (no standard control to read
+                // `isEnabled`) — swap to the muted surface explicitly.
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(hasText ? Palette.primary : Palette.elevated))
+            }
+            .buttonStyle(.plain)
+            .disabled(!hasText)
+            .handCursor()
+        }
+        .padding(.top, 2)
+    }
+
+    /// Shared by the compose box's Return-to-commit and the explicit Translate
+    /// button — same trim-guard-run shape as the other compose flows.
+    private func commitTranslateCompose() {
+        let trimmed = model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        model.translate(trimmed)
     }
 
     /// Jumps to the full history in the main app — the popover only ever shows
@@ -1572,6 +1619,8 @@ struct QuickTranslateView: View {
             listenVoicePicker
 
             let hasText = !model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            // Same muted-not-faded disabled treatment as Improve's compose CTA.
+            let ctaText = hasText ? Palette.primaryForeground : Palette.tertiary
             Button(action: commitListenCompose) {
                 HStack(spacing: 6) {
                     Text("Listen")
@@ -1580,19 +1629,20 @@ struct QuickTranslateView: View {
                     // the same thing as tapping this button.
                     Text("⏎")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(ctaText.opacity(0.75))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.white.opacity(0.18)))
+                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(ctaText.opacity(0.18)))
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(ctaText)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
-                .background(Capsule().fill(Color.accentColor))
-                // `.disabled` alone wouldn't dim a custom-styled button (no
-                // standard control to read `isEnabled`) — match the pattern
-                // `ListenTransport.stop` uses and fade it explicitly.
-                .opacity(hasText ? 1 : 0.4)
+                // `.disabled` alone wouldn't render a disabled look on a
+                // custom-styled button (no standard control to read
+                // `isEnabled`) — swap to the muted surface explicitly, the
+                // same treatment as Improve's compose CTA.
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(hasText ? Palette.primary : Palette.elevated))
             }
             .buttonStyle(.plain)
             .disabled(!hasText)
@@ -1785,6 +1835,9 @@ struct QuickTranslateView: View {
     /// does the same). Same row language as Listen's compose.
     private var improveComposeBar: some View {
         let hasText = !model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // Disabled reads muted, not faded: tertiary label on the secondary
+        // surface, matching how native controls gray out.
+        let ctaText = hasText ? Palette.primaryForeground : Palette.tertiary
         return HStack(spacing: 10) {
             // Goes to the app's Improve history (no inline list here — the
             // popover stays a quick compose surface).
@@ -1810,18 +1863,19 @@ struct QuickTranslateView: View {
                     // the same thing as tapping this button.
                     Text("⏎")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(ctaText.opacity(0.75))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.white.opacity(0.18)))
+                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(ctaText.opacity(0.18)))
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(ctaText)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
-                .background(Capsule().fill(Color.accentColor))
-                // `.disabled` alone wouldn't dim a custom-styled button (no
-                // standard control to read `isEnabled`) — fade it explicitly.
-                .opacity(hasText ? 1 : 0.4)
+                // `.disabled` alone wouldn't render a disabled look on a
+                // custom-styled button (no standard control to read
+                // `isEnabled`) — swap to the muted surface explicitly.
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(hasText ? Palette.primary : Palette.elevated))
             }
             .buttonStyle(.plain)
             .disabled(!hasText)
@@ -2139,10 +2193,10 @@ struct QuickTranslateView: View {
                             .font(.system(size: 12, weight: .semibold))
                         Text(copyOnly ? "Copy" : "Replace").font(.system(size: 13, weight: .semibold))
                     }
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Palette.primaryForeground)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
-                    .background(Capsule().fill(Color.accentColor))
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.primary))
                 }
                 .buttonStyle(.plain)
                 .disabled(!ready)

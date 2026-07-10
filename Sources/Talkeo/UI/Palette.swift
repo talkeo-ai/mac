@@ -11,6 +11,10 @@ enum Palette {
     static let muted = dynamic(0x555555, 0x8A8A8A)     // muted-foreground
     static let tertiary = dynamic(0xBBBBBB, 0x606060)
     static let border = dynamic(0xEBEBEB, 0x3A3A3A)
+    // Solid CTA fill, shadcn's "primary": the inverted monochrome chip — the
+    // brand has no colored accent, so primary actions read by contrast, not hue.
+    static let primary = dynamic(0x111111, 0xDEDEDE)
+    static let primaryForeground = dynamic(0xFAFAFA, 0x1C1C1C)
 
     static func dynamic(_ light: UInt, _ dark: UInt) -> Color {
         Color(nsColor: nsDynamic(light, dark))
