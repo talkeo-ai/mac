@@ -43,13 +43,18 @@ final class BarTooltipPanel {
     }
 
     /// Ask for the tip on a (new) button. Applies the delay/sticky rules.
-    func request(text: String, pointingAt target: NSRect) {
+    /// `anchor` is evaluated when the tip actually presents — which can be up
+    /// to `showDelay` after the hover — so the position always reflects where
+    /// the button is *then*, not a rect captured while the owning window was
+    /// still moving (the floating bar slides during auto-hide). Returning nil
+    /// aborts the presentation.
+    func request(text: String, anchor: @escaping () -> NSRect?) {
         showTimer?.invalidate()
         if panel.isVisible || CACurrentMediaTime() - lastHiddenAt < Self.stickyWindow {
-            present(text: text, pointingAt: target)
+            present(text: text, anchor: anchor)
         } else {
             showTimer = Timer.scheduledTimer(withTimeInterval: Self.showDelay, repeats: false) { [weak self] _ in
-                self?.present(text: text, pointingAt: target)
+                self?.present(text: text, anchor: anchor)
             }
         }
     }
@@ -64,7 +69,8 @@ final class BarTooltipPanel {
 
     /// Size to the label and sit to the button's left, tail vertically
     /// centered on it. Swapping text while visible repositions with no fade.
-    private func present(text: String, pointingAt target: NSRect) {
+    private func present(text: String, anchor: () -> NSRect?) {
+        guard let target = anchor() else { return }
         let hosting = NSHostingView(rootView: BarTooltipView(text: text))
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize

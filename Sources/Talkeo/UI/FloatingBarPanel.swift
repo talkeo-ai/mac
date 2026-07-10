@@ -150,15 +150,41 @@ final class FloatingBarPanel {
     private func buttonHovered(_ label: String, hovering: Bool) {
         if hovering {
             hoveredButton = label
-            guard !holdRevealed,
-                  let button = model.buttons.first(where: { $0.label == label }) else { return }
-            tooltip.request(text: label, pointingAt: screenRect(of: button.frame))
+            requestTooltip(for: label)
         } else if hoveredButton == label {
             // Guarded: moving between buttons can report the next enter
             // before this exit, and that fresher tip must survive.
             hoveredButton = nil
             tooltip.hide()
         }
+    }
+
+    /// Show the tip for a bar button. The anchor rect is resolved when the
+    /// tip actually presents (the show delay means the bar can move in
+    /// between), from the panel's frame *at that moment*. While the
+    /// reveal/retract slide is in flight the request is skipped entirely —
+    /// the auto-hide reveal slides the buttons under a stationary cursor, so
+    /// their hover fires mid-flight and any position computed then is a
+    /// mid-slide frame; `slideDidSettle()` re-issues the request once the
+    /// bar lands.
+    private func requestTooltip(for label: String) {
+        guard !holdRevealed, revealed, slideTimer == nil else { return }
+        tooltip.request(text: label) { [weak self] in
+            guard let self, self.revealed, self.slideTimer == nil,
+                  let button = self.model.buttons.first(where: { $0.label == label })
+            else { return nil }
+            return self.screenRect(of: button.frame)
+        }
+    }
+
+    /// A slide just finished: if a hover fired mid-flight (and the cursor is
+    /// really over that button now), pick its deferred tip request back up.
+    private func slideDidSettle() {
+        guard revealed, let label = hoveredButton,
+              let button = model.buttons.first(where: { $0.label == label }),
+              screenRect(of: button.frame).contains(NSEvent.mouseLocation)
+        else { return }
+        requestTooltip(for: label)
     }
 
     /// A view-reported (SwiftUI top-left) frame in screen coordinates.
@@ -287,7 +313,10 @@ final class FloatingBarPanel {
     /// curve. Manual interpolation because `NSPanel.animator().setFrame` moves
     /// borderless panels diagonally and snaps at the end.
     private func slideX(to targetX: CGFloat) {
+        // Nil, not just invalidate: `slideTimer == nil` is the "bar is
+        // settled" signal the tooltip logic keys off.
         slideTimer?.invalidate()
+        slideTimer = nil
         let y = shownOrigin().y
         let startX = panel.frame.origin.x
         // Lock Y immediately so the motion is strictly horizontal.
@@ -296,6 +325,7 @@ final class FloatingBarPanel {
         let dx = targetX - startX
         guard abs(dx) > 0.5 else {
             panel.setFrameOrigin(NSPoint(x: targetX, y: y))
+            slideDidSettle()
             return
         }
         let start = CACurrentMediaTime()
@@ -304,7 +334,11 @@ final class FloatingBarPanel {
             let p = min(1, (CACurrentMediaTime() - start) / Self.slideDuration)
             let eased = 1 - pow(1 - p, 3) // easeOutCubic
             self.panel.setFrameOrigin(NSPoint(x: startX + dx * eased, y: y))
-            if p >= 1 { timer.invalidate(); self.slideTimer = nil }
+            if p >= 1 {
+                timer.invalidate()
+                self.slideTimer = nil
+                self.slideDidSettle()
+            }
         }
     }
 

@@ -1041,7 +1041,10 @@ struct QuickTranslateView: View {
     /// "Full history" tapped from Listen's compose view — Listen's own
     /// history, not Translate's (see `onOpenFullListenHistory` on the panel).
     var onOpenFullListenHistory: () -> Void = {}
-    @State private var listenVoiceMock: String = QuickTranslateView.mockVoices[0]
+    /// Mock voice selection for Listen (see `ListenVoicePicker`). Held here,
+    /// above both Listen sub-states, so the pick persists across
+    /// compose ⇄ playback within the popover session.
+    @State private var listenVoiceMock: String = ListenVoicePicker.mockVoices[0]
     @State private var sourceHeight: CGFloat = QuickTranslateView.textBoxMinHeight
     @State private var targetHeight: CGFloat = QuickTranslateView.textBoxMinHeight
     /// Measured natural height of the improve correction card, so it scrolls
@@ -1075,9 +1078,6 @@ struct QuickTranslateView: View {
     /// Older ones live in the main app's History screen, reached via
     /// `fullHistoryLink`.
     private static let recentHistoryCount = 5
-    /// Placeholder voice names for Listen's voice picker — UI mockup only, not
-    /// wired to `TTSAudioPlayer` yet (there's a single voice today).
-    private static let mockVoices = ["Aria", "Nova", "Ember"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1599,7 +1599,7 @@ struct QuickTranslateView: View {
 
             Spacer()
 
-            listenVoicePicker
+            ListenVoicePicker(selection: $listenVoiceMock)
 
             let hasText = !model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             // Same muted-not-faded disabled treatment as Improve's compose CTA.
@@ -1634,30 +1634,6 @@ struct QuickTranslateView: View {
         .padding(.top, 2)
     }
 
-    /// Voice picker — UI mockup only (see `mockVoices`); doesn't affect
-    /// playback yet.
-    private var listenVoicePicker: some View {
-        Menu {
-            ForEach(QuickTranslateView.mockVoices, id: \.self) { voice in
-                Button(voice) { listenVoiceMock = voice }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "waveform")
-                    .font(.system(size: 10, weight: .medium))
-                Text(listenVoiceMock)
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .foregroundStyle(Palette.muted)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Capsule().fill(Palette.elevated.opacity(0.6)))
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .handCursor()
-    }
-
     /// Shared by the compose box's Return-to-commit and the explicit Listen
     /// button — same trim-guard-play the rest of the panel's compose flows use.
     private func commitListenCompose() {
@@ -1683,11 +1659,13 @@ struct QuickTranslateView: View {
             .cardChrome()
 
         // Transport: waveform, play/pause, ±5s skip, and speed — shared with
-        // the app page's Listen view.
+        // the app page's Listen view. The voice chip on the left is the same
+        // mock picker as compose's (one selection across both states).
         ListenPlaybackControls(
             text: model.sourceText,
             detectedLang: model.detectedLang,
-            speechRate: $model.speechRate
+            speechRate: $model.speechRate,
+            voiceSelection: $listenVoiceMock
         )
     }
 

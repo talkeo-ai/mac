@@ -13,6 +13,10 @@ struct ListenPlaybackControls: View {
     let text: String
     let detectedLang: String
     @Binding var speechRate: QuickTranslateModel.SpeechRate
+    /// When set, a voice chooser chip sits on the left of the control row,
+    /// mirroring the speed chip on the right. Mockup only for now — see
+    /// `ListenVoicePicker`. Nil hides it (the app page doesn't show it yet).
+    var voiceSelection: Binding<String>?
     @ObservedObject private var player = TTSAudioPlayer.shared
 
     private var mine: Bool { player.currentText == text }
@@ -45,6 +49,9 @@ struct ListenPlaybackControls: View {
                     skipButton(system: "goforward.5") { seek(by: 5) }
                 }
                 HStack {
+                    if let voiceSelection {
+                        ListenVoicePicker(selection: voiceSelection)
+                    }
                     Spacer()
                     speed
                 }
@@ -190,6 +197,41 @@ struct ListenPlaybackControls: View {
         guard seconds.isFinite, seconds >= 0 else { return "0:00" }
         let total = Int(seconds.rounded())
         return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+/// Voice chooser chip — UI mockup wired for when multiple voices ship.
+/// Picking a name only updates the label; playback isn't affected (there's a
+/// single real voice today, see `TTSAudioPlayer`). Shared by Listen's compose
+/// row and the playback transport in the popover, both bound to the same
+/// selection so it carries across the two states.
+struct ListenVoicePicker: View {
+    /// Placeholder voice names — not wired to `TTSAudioPlayer` yet.
+    static let mockVoices = ["Aria", "Nova", "Ember"]
+    @Binding var selection: String
+
+    var body: some View {
+        Menu {
+            ForEach(Self.mockVoices, id: \.self) { voice in
+                Button(voice) { selection = voice }
+            }
+        } label: {
+            // Quiet/muted chip, same visual language as the speed chip — it
+            // shouldn't compete with play/pause.
+            HStack(spacing: 4) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 10, weight: .medium))
+                Text(selection)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(Palette.muted)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Palette.elevated.opacity(0.6)))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .handCursor()
     }
 }
 
