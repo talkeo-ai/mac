@@ -130,7 +130,7 @@ final class QuickTranslatePanel {
         // left floating over the main window (its dismiss monitor only sees
         // clicks on OTHER apps, so it wouldn't go away on its own).
         onOpenImproveHistoryRef = { [weak self] in
-            self?.hide()
+            self?.hide(restoringFocus: false)
             self?.onOpenImproveHistory?()
         }
         onOpenFullListenHistoryRef = { [weak self] in self?.onOpenFullListenHistory?() }
@@ -292,7 +292,11 @@ final class QuickTranslatePanel {
         onVisibilityChange?(true)
     }
 
-    func hide() {
+    /// `restoringFocus: false` is for hand-offs INTO our own app (popover →
+    /// main window): the deferred restore would fire after the main window
+    /// activates, pass its `NSApp.isActive` guard, and bury the window the
+    /// user just navigated to under the previous app.
+    func hide(restoringFocus: Bool = true) {
         removeDismissMonitor()
         pendingShrink?.cancel()
         pendingShrink = nil
@@ -309,7 +313,7 @@ final class QuickTranslatePanel {
         // Release the bar as soon as the fade starts — visually the popover is
         // already going away, so the bar may retract with it.
         onVisibilityChange?(false)
-        restoreFocus()
+        if restoringFocus { restoreFocus() }
     }
 
     /// Hand focus back to the app the popover took it from — but only if we

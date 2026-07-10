@@ -25,6 +25,15 @@ final class MainWindowController: NSObject {
         show(section: .translate)
     }
 
+    /// Same deep-link for Improve's compose bar: land on Improve with the
+    /// drawer open. Refreshed here because the page may already be mounted
+    /// (no onAppear) while the popover was writing to the shared store.
+    func openImproveHistory() {
+        model.improve.historyOpen = true
+        model.improve.refreshHistory()
+        show(section: .improve)
+    }
+
     /// Order the main window front and focus the app. Pass a section to land
     /// on it; nil keeps whatever the user last had open.
     func show(section: MainSection? = nil) {
@@ -171,6 +180,7 @@ enum MainSection: String, CaseIterable, Identifiable {
 final class MainWindowModel: ObservableObject {
     @Published var selection: MainSection = .translate
     let translate = TranslatePageModel()
+    let improve = ImprovePageModel()
 }
 
 struct MainWindowView: View {
@@ -257,15 +267,7 @@ struct MainWindowView: View {
         case .translate:
             TranslatePage(model: model.translate)
         case .improve:
-            ToolPage(
-                section: .improve,
-                summary: "Rewrite your English and replace it right where you wrote it.",
-                steps: [
-                    "Select something you wrote.",
-                    "Click the improve button in the floating bar.",
-                    "Review the diff and replace in place (or copy)."
-                ]
-            )
+            ImprovePage(model: model.improve)
         case .listen:
             ToolPage(
                 section: .listen,
