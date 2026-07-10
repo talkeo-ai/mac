@@ -2746,12 +2746,14 @@ private struct LucidePencilShape: Shape {
     }
 }
 
-private enum QuickIcon {
+enum QuickIcon {
     case system(String, weight: Font.Weight)
     case pencil
 }
 
-private struct QuickIconButton: View {
+/// Internal (not private): the capture preview reuses it so both panels'
+/// icon controls hover and size identically.
+struct QuickIconButton: View {
     let icon: QuickIcon
     let action: () -> Void
     @State private var hover = false
@@ -2814,8 +2816,9 @@ private struct ImproveCardHeightKey: PreferenceKey {
     }
 }
 
-/// Native vibrancy backing for the popover's frosted surface.
-private struct QuickVisualEffectView: NSViewRepresentable {
+/// Native vibrancy backing for the popover's frosted surface. Internal (not
+/// private): the capture preview shares the exact same chrome recipe.
+struct QuickVisualEffectView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
         view.material = .menu

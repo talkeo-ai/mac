@@ -6,6 +6,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var quickTranslate: QuickTranslatePanel!
     private var floatingBar: FloatingBarPanel!
     private var mainWindow: MainWindowController!
+    private var capturePreview: CapturePreviewPanel!
+    private let screenCapturer: ScreenCapturing = CLIScreenCapturer()
     private let reader = SelectionReader()
     private let permission = AccessibilityPermission()
     private let settings: SettingsStore = LocalSettingsStore.shared
@@ -26,6 +28,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         floatingBar.onTranslate = { [weak self] in self?.translateCurrentSelection() }
         floatingBar.onImprove = { [weak self] in self?.improveCurrentSelection() }
         floatingBar.onListen = { [weak self] in self?.listenCurrentSelection() }
+        floatingBar.onCapture = { [weak self] in self?.captureScreen() }
+
+        // Capture's verbs land in the same popover entry points as the bar's
+        // own buttons — the preview resolves WHICH text (in-image selection
+        // vs. full transcript); the routing lives here where both panels are
+        // owned.
+        capturePreview = CapturePreviewPanel()
+        capturePreview.onTranslate = { [weak self] text in self?.quickTranslate.show(text: text) }
+        capturePreview.onImprove = { [weak self] text in self?.quickTranslate.improve(text: text) }
+        capturePreview.onListen = { [weak self] text in self?.quickTranslate.listen(text: text) }
         // An auto-hiding bar must never retract from under its open popover.
         quickTranslate.onVisibilityChange = { [weak self] visible in
             self?.floatingBar.setHoldRevealed(visible)
@@ -156,6 +168,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.quickTranslate.listen(text: text)
             } else {
                 self.quickTranslate.showListenHistory()
+            }
+        }
+    }
+
+    /// Runs the interactive region capture and opens the Live Text preview.
+    /// Talkeo's own chrome (popover, an earlier preview, the bar) hides first
+    /// so it can't end up inside the screenshot; the bar restores whatever
+    /// the outcome.
+    private func captureScreen() {
+        guard ScreenRecordingPermission.ensureAccess() else {
+            showScreenRecordingDeniedAlert()
+            return
+        }
+        quickTranslate.hide()
+        capturePreview.hide() // a re-capture supersedes an open preview
+        let barWasVisible = floatingBar.isVisible
+        if barWasVisible { floatingBar.hide() } // poll-proof: evaluate() guards on featureVisible
+        screenCapturer.captureInteractive { [weak self] outcome in
+            guard let self else { return }
+            if barWasVisible { self.floatingBar.show() }
+            switch outcome {
+            case .cancelled:
+                break // Esc in the crosshair — a user choice, stay silent
+            case .failed(let reason):
+                NSLog("Capture failed: %@", reason) // rare decode failure; silent for now
+            case .image(let image):
+                self.capturePreview.show(image: image)
+            }
+        }
+    }
+
+    /// The one-shot system prompt was already consumed by the time we get
+    /// here (CGRequestScreenCaptureAccess only ever shows it once); from now
+    /// on the user must flip the toggle manually. The app is LSUIElement, so
+    /// activate before the modal or it opens behind the frontmost app — the
+    /// single sanctioned NSApp.activate in the codebase, acceptable because a
+    /// permission modal IS a context switch.
+    private func showScreenRecordingDeniedAlert() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Screen Recording permission needed"
+        alert.informativeText = "Talkeo captures a region of the screen to read its text. "
+            + "Enable Talkeo under Privacy & Security → Screen Recording, then relaunch Talkeo."
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            let pane = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            if let url = URL(string: pane) {
+                NSWorkspace.shared.open(url)
             }
         }
     }
