@@ -449,19 +449,27 @@ final class QuickTranslateModel: ObservableObject {
     /// cloud-voice player), where 1.0 is normal speed — so the values are the
     /// literal multipliers the labels advertise (0.75×/1×/1.25×).
     enum SpeechRate: String, CaseIterable {
-        case slow, normal, fast
+        case slowest, slower, slow, normal, fast, faster, fastest
         var value: Float {
             switch self {
+            case .slowest: return 0.5
+            case .slower: return 0.6
             case .slow: return 0.75
             case .normal: return 1.0
             case .fast: return 1.25
+            case .faster: return 1.5
+            case .fastest: return 2.0
             }
         }
         var label: String {
             switch self {
+            case .slowest: return "0.5×"
+            case .slower: return "0.6×"
             case .slow: return "0.75×"
             case .normal: return "1×"
             case .fast: return "1.25×"
+            case .faster: return "1.5×"
+            case .fastest: return "2×"
             }
         }
     }
@@ -2494,6 +2502,9 @@ private struct SelectableText: NSViewRepresentable {
     var spokenRange: NSRange? = nil
     /// When true the view is an editable input (no marking); Enter commits.
     var isEditable: Bool = false
+    /// Fire `onSelect` on a plain click, not just a drag-selection — Listen's
+    /// "tap any word to jump there" (see `MarkerTextView.picksOnPlainClick`).
+    var picksOnPlainClick: Bool = false
     var onTextChange: (String) -> Void = { _ in }
     var onCommit: () -> Void = {}
     var onSelect: (String, NSRange) -> Void
@@ -2588,6 +2599,7 @@ private struct SelectableText: NSViewRepresentable {
         coordinator.onSelect = onSelect
         coordinator.onTextChange = onTextChange
         coordinator.onCommit = onCommit
+        textView.picksOnPlainClick = picksOnPlainClick
 
         // Single source of truth for the container's width (see `makeNSView`).
         textView.textContainer?.containerSize = NSSize(width: max(width, 1), height: .greatestFiniteMagnitude)
@@ -2787,6 +2799,7 @@ private struct ListenTextPane: View {
             highlights: model.highlights(for: .source),
             spokenRange: spoken.range,
             isEditable: false,
+            picksOnPlainClick: true,
             onTextChange: { _ in },
             onCommit: {}
         ) { term, range in
@@ -2908,28 +2921,32 @@ private struct ListenTransport: View {
         .handCursor()
     }
 
+    /// A chip that opens a menu rather than a segmented row — seven speeds
+    /// wouldn't fit as buttons side by side in the popover's width.
     private var speed: some View {
-        HStack(spacing: 2) {
+        Menu {
             ForEach(QuickTranslateModel.SpeechRate.allCases, id: \.self) { rate in
-                let on = model.speechRate == rate
-                Button {
+                Button(rate.label) {
                     model.speechRate = rate
                     player.setRate(rate.value)
-                } label: {
-                    Text(rate.label)
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(on ? Palette.foreground : Palette.muted)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(on ? Palette.elevated : Color.clear))
                 }
-                .buttonStyle(.plain)
-                .handCursor()
             }
+        } label: {
+            HStack(spacing: 3) {
+                Text(model.speechRate.label)
+                    .font(.system(size: 11, weight: .medium))
+                    .monospacedDigit()
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+            }
+            .foregroundStyle(Palette.muted)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Palette.elevated.opacity(0.6)))
         }
-        .padding(3)
-        .background(Capsule().fill(Palette.elevated.opacity(0.4)))
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .handCursor()
     }
 
     private func caption(_ text: String) -> some View {

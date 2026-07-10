@@ -331,7 +331,8 @@ private struct ListenPlaybackPane: View {
             isEditable: false,
             onWordSelect: onPick,
             markers: highlights,
-            spokenRange: spoken.range
+            spokenRange: spoken.range,
+            picksOnPlainClick: true
         )
     }
 }
@@ -444,27 +445,31 @@ private struct ListenPageTransport: View {
         .disabled(!hasAudio)
     }
 
+    /// A chip that opens a menu rather than a segmented row — seven speeds
+    /// wouldn't fit as buttons side by side.
     private var speed: some View {
-        HStack(spacing: 2) {
+        Menu {
             ForEach(QuickTranslateModel.SpeechRate.allCases, id: \.self) { rate in
-                let on = speechRate == rate
-                Button {
+                Button(rate.label) {
                     speechRate = rate
                     player.setRate(rate.value)
-                } label: {
-                    Text(rate.label)
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(on ? Palette.foreground : Palette.muted)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(on ? Palette.elevated : Color.clear))
                 }
-                .buttonStyle(.plain)
             }
+        } label: {
+            HStack(spacing: 3) {
+                Text(speechRate.label)
+                    .font(.system(size: 11, weight: .medium))
+                    .monospacedDigit()
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+            }
+            .foregroundStyle(Palette.muted)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Palette.elevated.opacity(0.6)))
         }
-        .padding(3)
-        .background(Capsule().fill(Palette.elevated.opacity(0.4)))
+        .menuStyle(.borderlessButton)
+        .fixedSize()
     }
 
     private func primaryAction() {

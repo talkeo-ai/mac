@@ -34,6 +34,10 @@ struct PlainTextEditor: NSViewRepresentable {
     /// a real line break. `nil` (Translate's/Improve's default) leaves Return
     /// as a plain newline.
     var onCommit: (() -> Void)? = nil
+    /// Fire `onWordSelect` on a plain click, not just a drag-selection —
+    /// Listen's "tap any word to jump there" (see
+    /// `MarkerTextView.picksOnPlainClick`).
+    var picksOnPlainClick: Bool = false
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -95,6 +99,7 @@ struct PlainTextEditor: NSViewRepresentable {
         guard let textView = scroll.documentView as? MarkerTextView else { return }
         context.coordinator.parent = self
         textView.isEditable = isEditable
+        textView.picksOnPlainClick = picksOnPlainClick
         if textView.string != text {
             textView.string = text
         }
