@@ -36,6 +36,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // "History" in Improve's compose opens the app's Improve view (past
         // rewrites live there, not in the popover).
         quickTranslate.onOpenImproveHistory = { [weak self] in self?.mainWindow.show(section: .improve) }
+        // "Full history" in Listen's compose opens the app's Listen view with
+        // its history drawer open (past listens live there, not the popover).
+        quickTranslate.onOpenFullListenHistory = { [weak self] in self?.mainWindow.openListenHistory() }
         // Restore persisted preferences before the first show, so an auto-hiding
         // bar starts retracted instead of flashing revealed.
         floatingBar.setAutoHide(settings.barAutoHide)

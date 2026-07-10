@@ -25,6 +25,13 @@ final class MainWindowController: NSObject {
         show(section: .translate)
     }
 
+    /// Deep-link for the popover's Listen "Full history": land on Listen with
+    /// the history drawer open.
+    func openListenHistory() {
+        model.listen.historyOpen = true
+        show(section: .listen)
+    }
+
     /// Order the main window front and focus the app. Pass a section to land
     /// on it; nil keeps whatever the user last had open.
     func show(section: MainSection? = nil) {
@@ -171,6 +178,7 @@ enum MainSection: String, CaseIterable, Identifiable {
 final class MainWindowModel: ObservableObject {
     @Published var selection: MainSection = .translate
     let translate = TranslatePageModel()
+    let listen = ListenPageModel()
 }
 
 struct MainWindowView: View {
@@ -267,15 +275,7 @@ struct MainWindowView: View {
                 ]
             )
         case .listen:
-            ToolPage(
-                section: .listen,
-                summary: "Hear any text out loud with word-by-word highlight.",
-                steps: [
-                    "Select the text you want to hear.",
-                    "Click the listen button in the floating bar.",
-                    "Follow along as each word lights up."
-                ]
-            )
+            ListenPage(model: model.listen)
         case .capture:
             ToolPage(
                 section: .capture,
