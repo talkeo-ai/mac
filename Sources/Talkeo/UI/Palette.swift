@@ -46,4 +46,15 @@ enum Palette {
     }
 
     static let nsForeground = nsDynamic(0x111111, 0xDEDEDE)
+
+    /// The word currently being spoken (Listen's karaoke highlight) —
+    /// stronger than a pick marker so it reads as "live," but still the
+    /// brand's monochrome (no `controlAccentColor`, which pulls in whatever
+    /// accent color the user picked in System Settings).
+    static func spokenMarker() -> NSColor {
+        NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            return rgb(isDark ? 0xDEDEDE : 0x111111).withAlphaComponent(0.24)
+        }
+    }
 }

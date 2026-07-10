@@ -2,9 +2,9 @@ import AppKit
 import SwiftUI
 
 /// Shared building blocks of the main window's tool pages (Translate,
-/// Improve, …). Each page keeps its own layout and states — these are the
-/// identical pieces: the native pane editor, the quiet icon buttons, and the
-/// history-drawer chrome. Same split as `ExplainCardParts` for the cards.
+/// Improve, Listen, …). Each page keeps its own layout and states — these are
+/// the identical pieces: the native pane editor, the quiet icon buttons, and
+/// the history-drawer chrome. Same split as `ExplainCardParts` for the cards.
 
 /// Minimal NSTextView wrapper for a page's text panes. SwiftUI's TextEditor
 /// misbehaves for real editing here (selection/paste — same class of problem
@@ -27,6 +27,13 @@ struct PlainTextEditor: NSViewRepresentable {
     /// Override marker fill (Improve's red diff tint); nil keeps the standard
     /// pick-marker look.
     var markerColor: NSColor?
+    /// Word currently being spoken (Listen): drawn in accent on top of any
+    /// markers, karaoke-style. `nil` everywhere else.
+    var spokenRange: NSRange? = nil
+    /// Return commits (e.g. Listen's "play this"); Shift+Return still inserts
+    /// a real line break. `nil` (Translate's/Improve's default) leaves Return
+    /// as a plain newline.
+    var onCommit: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -96,6 +103,7 @@ struct PlainTextEditor: NSViewRepresentable {
         let length = (textView.string as NSString).length
         textView.markers = markers.filter { NSMaxRange($0.range) <= length }
         textView.markerColor = markerColor
+        textView.spokenMarker = spokenRange.flatMap { NSMaxRange($0) <= length ? $0 : nil }
         textView.needsDisplay = true
     }
 
@@ -107,6 +115,14 @@ struct PlainTextEditor: NSViewRepresentable {
             guard let textView = notification.object as? NSTextView else { return }
             parent.text = textView.string
             parent.onUserEdit?()
+        }
+
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            guard let onCommit = parent.onCommit,
+                  commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
+            if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { return false }
+            onCommit()
+            return true
         }
     }
 }

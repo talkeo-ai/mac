@@ -37,6 +37,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // with its history drawer open (past rewrites live there, not in the
         // popover) — same deep-link shape as Translate's.
         quickTranslate.onOpenImproveHistory = { [weak self] in self?.mainWindow.openImproveHistory() }
+        // "Full history" in Listen's compose opens the app's Listen view with
+        // its history drawer open (past listens live there, not the popover).
+        quickTranslate.onOpenFullListenHistory = { [weak self] in self?.mainWindow.openListenHistory() }
         // Restore persisted preferences before the first show, so an auto-hiding
         // bar starts retracted instead of flashing revealed.
         floatingBar.setAutoHide(settings.barAutoHide)

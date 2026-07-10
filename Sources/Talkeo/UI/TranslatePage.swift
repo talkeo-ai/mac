@@ -686,5 +686,6 @@ private struct HistoryRow: View {
     }
 }
 
-// (PaneIconButton, CopyButton, HistoryToggle, RowDeleteButton and the native
-// PlainTextEditor moved to PageParts.swift — shared with the Improve page.)
+// (PaneIconButton, CopyButton, SpeakerButton, HistoryToggle, RowDeleteButton
+// and the native PlainTextEditor moved to PageParts.swift — shared with the
+// Improve and Listen pages.)

@@ -134,7 +134,7 @@ final class MarkerTextView: NSTextView {
             in: tc
         ) { rect, _ in
             let frame = rect.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: -3, dy: 0)
-            NSColor.controlAccentColor.withAlphaComponent(0.28).setFill()
+            Palette.spokenMarker().setFill()
             NSBezierPath(roundedRect: frame, xRadius: 6, yRadius: 6).fill()
         }
     }

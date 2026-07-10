@@ -133,7 +133,12 @@ final class QuickTranslatePanel {
             self?.hide(restoringFocus: false)
             self?.onOpenImproveHistory?()
         }
-        onOpenFullListenHistoryRef = { [weak self] in self?.onOpenFullListenHistory?() }
+        // Same reasoning as Improve above: hand-off into our own app, not a
+        // dismiss-to-elsewhere, so the deferred focus restore must not run.
+        onOpenFullListenHistoryRef = { [weak self] in
+            self?.hide(restoringFocus: false)
+            self?.onOpenFullListenHistory?()
+        }
     }
 
     func show(text: String) {
@@ -444,19 +449,27 @@ final class QuickTranslateModel: ObservableObject {
     /// cloud-voice player), where 1.0 is normal speed — so the values are the
     /// literal multipliers the labels advertise (0.75×/1×/1.25×).
     enum SpeechRate: String, CaseIterable {
-        case slow, normal, fast
+        case slowest, slower, slow, normal, fast, faster, fastest
         var value: Float {
             switch self {
+            case .slowest: return 0.5
+            case .slower: return 0.6
             case .slow: return 0.75
             case .normal: return 1.0
             case .fast: return 1.25
+            case .faster: return 1.5
+            case .fastest: return 2.0
             }
         }
         var label: String {
             switch self {
+            case .slowest: return "0.5×"
+            case .slower: return "0.6×"
             case .slow: return "0.75×"
             case .normal: return "1×"
             case .fast: return "1.25×"
+            case .faster: return "1.5×"
+            case .fastest: return "2×"
             }
         }
     }
@@ -505,6 +518,7 @@ final class QuickTranslateModel: ObservableObject {
     func highlights(for pane: Pane) -> [(range: NSRange, active: Bool)] {
         session.highlights(for: pane)
     }
+
 
     /// The language shown in a pane: the detected one on top, the translation
     /// below.
@@ -612,9 +626,8 @@ final class QuickTranslateModel: ObservableObject {
 
     // MARK: Listen (TTS playback + select-to-hear)
 
-    /// Open the Listen card for `text`: show it, detect its language, and load the
-    /// real Talkeo voice (auto-plays once ready). Selecting a word later jumps the
-    /// playhead to it in the same clip.
+    /// Open the Listen card for `text`: show it, detect its language, and load
+    /// the real Talkeo voice (auto-plays once ready).
     func listen(_ text: String) {
         task?.cancel()
         clearSelection()
@@ -666,40 +679,6 @@ final class QuickTranslateModel: ObservableObject {
     /// Load + play the whole text through the real TTS voice.
     func playFull() {
         TTSAudioPlayer.shared.load(sourceText, lang: detectedLang, rate: speechRate.value)
-    }
-
-    /// The user selected a word/phrase: mark it, focus it, and jump the playhead
-    /// to it in the buffered clip (instant — no extra synthesis). No explanations
-    /// — the session just marks (`loadCard: false`).
-    func pickListen(term: String, range: NSRange) {
-        let item = ExplainTerm(text: term, sentence: sourceText, sourceLang: detectedLang, targetLang: detectedLang, pane: .source, range: range)
-        session.pick(item, loadCard: false)
-        guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        seekToWord(range)
-    }
-
-    /// Page between selected words and jump the playhead to each.
-    func stepListen(by delta: Int) {
-        session.step(by: delta, loadCard: false)
-        if let term = activeTerm { seekToWord(term.range) }
-    }
-
-    /// Drop the focused selected word, focusing a neighbour.
-    func removeActiveListen() {
-        session.removeActive()
-    }
-
-    /// Jump the buffered clip to where `range` starts in the text. Loads the clip
-    /// first (from that point) if it isn't ready yet.
-    private func seekToWord(_ range: NSRange) {
-        let length = (sourceText as NSString).length
-        let fraction = length > 0 ? Double(range.location) / Double(length) : 0
-        let player = TTSAudioPlayer.shared
-        if player.hasAudio(sourceText) {
-            player.seek(toFraction: fraction)
-        } else {
-            player.load(sourceText, lang: detectedLang, rate: speechRate.value, fromFraction: fraction)
-        }
     }
 
     // MARK: Improve (native/natural rewrite)
@@ -1687,8 +1666,7 @@ struct QuickTranslateView: View {
         model.listen(trimmed)
     }
 
-    /// A text is loaded: the karaoke-highlighted pane, the transport, and
-    /// (once a word's been picked) its pager footer.
+    /// A text is loaded: the karaoke-highlighted pane and the transport.
     @ViewBuilder
     private var listenPlaybackSection: some View {
         HStack {
@@ -1698,45 +1676,19 @@ struct QuickTranslateView: View {
         }
         .frame(height: 26)
 
-        // The text — tap a word to jump the playhead there; the word being
-        // spoken is highlighted as it plays (its own observing subview, so it
-        // refreshes per word, not on the 60 fps progress ticks).
+        // The text — the word being spoken is highlighted as it plays (its
+        // own observing subview, so it refreshes per word, not on the 60 fps
+        // progress ticks).
         ListenTextPane(model: model, height: $sourceHeight)
             .cardChrome()
 
-        // Transport: play / pause / stop, a seekable timeline, and speed.
-        ListenTransport(model: model)
-
-        // Make the tap-to-jump gesture discoverable, same spirit as
-        // Translate's `selectHint` — only until the user's picked a word once.
-        if model.terms.isEmpty {
-            listenHint
-        }
-
-        // The currently-selected word: page with ‹ › (each jumps the playhead).
-        if let term = model.activeTerm {
-            Divider().overlay(Palette.border).opacity(0.6)
-            HStack(alignment: .center, spacing: 10) {
-                Text(term.text)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(Palette.foreground)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 4)
-                Button(action: { model.stepListen(by: 0) }) {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Palette.muted)
-                        .frame(width: 24, height: 24)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Jump here")
-                .handCursor()
-                if model.terms.count > 1 { listenPager }
-                removeButton { model.removeActiveListen() }
-            }
-        }
+        // Transport: waveform, play/pause, ±5s skip, and speed — shared with
+        // the app page's Listen view.
+        ListenPlaybackControls(
+            text: model.sourceText,
+            detectedLang: model.detectedLang,
+            speechRate: $model.speechRate
+        )
     }
 
     /// Consistent close-button chrome — matches `sourceCardSection`'s (26×26
@@ -1751,36 +1703,6 @@ struct QuickTranslateView: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .handCursor()
-    }
-
-    private var listenHint: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "hand.tap")
-                .font(.system(size: 10, weight: .medium))
-            Text("Tap any word to jump there")
-                .font(.system(size: 11))
-        }
-        .foregroundStyle(Palette.tertiary)
-        .frame(maxWidth: .infinity, alignment: .center)
-    }
-
-    /// ‹ 1/2 › pager over the selected fragments (plays each as you page).
-    private var listenPager: some View {
-        HStack(spacing: 8) {
-            Button(action: { model.stepListen(by: -1) }) {
-                Image(systemName: "chevron.left").font(.system(size: 11, weight: .bold))
-            }
-            .buttonStyle(.plain)
-            Text("\((model.activeTermIndex ?? 0) + 1) / \(model.terms.count)")
-                .font(.system(size: 11, weight: .medium))
-                .monospacedDigit()
-            Button(action: { model.stepListen(by: 1) }) {
-                Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold))
-            }
-            .buttonStyle(.plain)
-        }
-        .foregroundStyle(Palette.muted)
         .handCursor()
     }
 
@@ -2777,170 +2699,18 @@ private struct ListenTextPane: View {
         SelectableText(
             text: model.sourceText,
             height: $height,
-            width: QuickTranslateView.width - 32,
+            width: QuickTranslateView.cardTextWidth,
             maxHeight: 240,
-            highlights: model.highlights(for: .source),
             spokenRange: spoken.range,
             isEditable: false,
             onTextChange: { _ in },
             onCommit: {}
-        ) { term, range in
-            model.pickListen(term: term, range: range)
-        }
+        ) { _, _ in }
         .frame(height: height)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-/// Playback transport for the Listen card: a seekable timeline (scrub anywhere)
-/// plus play/pause/stop and speed, driven by the real Talkeo voice
-/// (`TTSAudioPlayer`). Observes only the player, so the 60 fps progress ticks
-/// re-render just this small view. Shows a loading state while the clip
-/// synthesizes and a retry on failure.
-private struct ListenTransport: View {
-    @ObservedObject var model: QuickTranslateModel
-    @ObservedObject private var player = TTSAudioPlayer.shared
-
-    private var text: String { model.sourceText }
-    private var mine: Bool { player.currentText == text }
-    private var loading: Bool { mine && player.isLoading }
-    private var failed: Bool { mine && player.failed }
-    private var hasAudio: Bool { player.hasAudio(text) }
-    private var playing: Bool { mine && player.isPlaying }
-    private var progress: Double { mine ? player.progress : 0 }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            timeline
-            HStack(spacing: 10) {
-                primary
-                stop
-                Spacer()
-                speed
-            }
-            if loading {
-                // Shimmer, not a flat caption: the controls above are already in
-                // their final shape while loading (only enabled-ness changes),
-                // so this just borrows Translate's "in progress" language for
-                // the one bit of text that does change.
-                shimmerBar(width: 130, height: 11)
-            } else if failed {
-                caption("Couldn't load the voice — tap ↻ to retry.")
-            }
-        }
-    }
-
-    private var timeline: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let x = max(0, min(w, w * progress))
-            ZStack(alignment: .leading) {
-                Capsule().fill(Palette.elevated).frame(height: 5)
-                Capsule().fill(Color.accentColor).frame(width: x, height: 5)
-                Circle()
-                    .fill(.white)
-                    .frame(width: 13, height: 13)
-                    .overlay(Circle().stroke(Palette.border, lineWidth: 0.5))
-                    .shadow(color: .black.opacity(0.18), radius: 1.5, y: 0.5)
-                    .offset(x: x - 6.5)
-                    .opacity(hasAudio ? 1 : 0)
-            }
-            .frame(maxHeight: .infinity, alignment: .center)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        guard hasAudio else { return }
-                        player.seek(toFraction: fraction(value.location.x, w))
-                    }
-                    .onEnded { value in
-                        let frac = fraction(value.location.x, w)
-                        if hasAudio { player.seek(toFraction: frac) }
-                        else if !loading {
-                            player.load(text, lang: model.detectedLang, rate: model.speechRate.value, fromFraction: frac)
-                        }
-                    }
-            )
-            .handCursor()
-        }
-        .frame(height: 16)
-    }
-
-    private func fraction(_ x: CGFloat, _ width: CGFloat) -> Double {
-        Double(max(0, min(1, x / max(width, 1))))
-    }
-
-    private var primary: some View {
-        Button(action: primaryAction) {
-            ZStack {
-                Circle().fill(Color.accentColor).frame(width: 34, height: 34)
-                if loading {
-                    ProgressView().controlSize(.small).tint(.white)
-                } else {
-                    Image(systemName: failed ? "arrow.clockwise" : (playing ? "pause.fill" : "play.fill"))
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .disabled(loading)
-        .help(failed ? "Retry" : (playing ? "Pause" : "Play"))
-        .handCursor()
-    }
-
-    private var stop: some View {
-        Button(action: { player.stop() }) {
-            Image(systemName: "stop.fill")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(hasAudio ? Palette.muted : Palette.tertiary)
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(Palette.elevated))
-        }
-        .buttonStyle(.plain)
-        .help("Stop")
-        .disabled(!hasAudio)
-        .handCursor()
-    }
-
-    private var speed: some View {
-        HStack(spacing: 2) {
-            ForEach(QuickTranslateModel.SpeechRate.allCases, id: \.self) { rate in
-                let on = model.speechRate == rate
-                Button {
-                    model.speechRate = rate
-                    player.setRate(rate.value)
-                } label: {
-                    Text(rate.label)
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(on ? Palette.foreground : Palette.muted)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(on ? Palette.elevated : Color.clear))
-                }
-                .buttonStyle(.plain)
-                .handCursor()
-            }
-        }
-        .padding(3)
-        .background(Capsule().fill(Palette.elevated.opacity(0.4)))
-    }
-
-    private func caption(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 11))
-            .foregroundStyle(Palette.tertiary)
-    }
-
-    private func primaryAction() {
-        if failed || !hasAudio {
-            player.load(text, lang: model.detectedLang, rate: model.speechRate.value)
-        } else {
-            player.togglePlayPause()
-        }
-    }
-}
 
 /// The one non-SF glyph in the row: SF's pencil is a wispy diagonal stick even
 /// in bold, so the edit affordance uses Lucide's pencil (ISC license), traced
