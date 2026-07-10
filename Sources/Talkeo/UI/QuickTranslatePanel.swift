@@ -525,11 +525,6 @@ final class QuickTranslateModel: ObservableObject {
         session.highlights(for: pane)
     }
 
-    /// Listen's own marker — a single range, not the shared multi-term
-    /// session (Listen doesn't page between picks anymore).
-    var listenHighlights: [(range: NSRange, active: Bool)] {
-        listenSelection.map { [($0, true)] } ?? []
-    }
 
     /// The language shown in a pane: the detected one on top, the translation
     /// below.
@@ -644,6 +639,7 @@ final class QuickTranslateModel: ObservableObject {
         task?.cancel()
         clearSelection()
         listenSelection = nil
+        TTSAudioPlayer.shared.setPlaybackWindow(nil) // stale window from a previous text doesn't carry over
         // Animated: mirrors `translate(_:)`, so leaving the compose/history view
         // for a playing clip transitions instead of popping.
         withAnimation(.easeInOut(duration: 0.22)) {
@@ -695,29 +691,41 @@ final class QuickTranslateModel: ObservableObject {
         TTSAudioPlayer.shared.load(sourceText, lang: detectedLang, rate: speechRate.value)
     }
 
-    /// The user tapped a word/phrase: pick it and jump the playhead to it in
-    /// the buffered clip (instant — no extra synthesis). Tapping the exact
-    /// same span again clears the pick instead of re-picking it.
+    /// The user tapped a word/phrase: pick it and play just that part, like a
+    /// video editor's in/out selection — reaching its end rewinds to its
+    /// start instead of continuing into the rest of the clip. Tapping the
+    /// exact same span again clears the pick and returns to the whole clip.
     func pickListen(term: String, range: NSRange) {
         guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         if let current = listenSelection, NSEqualRanges(current, range) {
-            listenSelection = nil
+            clearListenSelection()
             return
         }
         listenSelection = range
-        seekToWord(range)
+        playListenSelection(range)
     }
 
-    /// Jump the buffered clip to where `range` starts in the text. Loads the clip
-    /// first (from that point) if it isn't ready yet.
-    private func seekToWord(_ range: NSRange) {
+    /// Return to playing the whole clip, un-confined.
+    func clearListenSelection() {
+        listenSelection = nil
+        TTSAudioPlayer.shared.setPlaybackWindow(nil)
+    }
+
+    /// Confine playback to `range` and start playing it from its start
+    /// (loading the clip first if it isn't ready yet).
+    private func playListenSelection(_ range: NSRange) {
         let length = (sourceText as NSString).length
-        let fraction = length > 0 ? Double(range.location) / Double(length) : 0
+        guard length > 0 else { return }
+        let start = Double(range.location) / Double(length)
+        let end = Double(NSMaxRange(range)) / Double(length)
+        guard end > start else { return }
         let player = TTSAudioPlayer.shared
+        player.setPlaybackWindow(start...end)
         if player.hasAudio(sourceText) {
-            player.seek(toFraction: fraction)
+            player.seek(toFraction: start)
+            player.resume()
         } else {
-            player.load(sourceText, lang: detectedLang, rate: speechRate.value, fromFraction: fraction)
+            player.load(sourceText, lang: detectedLang, rate: speechRate.value, fromFraction: start)
         }
     }
 
@@ -2470,6 +2478,9 @@ private struct SelectableText: NSViewRepresentable {
     /// Word currently being spoken (Listen): drawn in accent on top of any picks,
     /// karaoke-style.
     var spokenRange: NSRange? = nil
+    /// The selected range (Listen): drawn as an outline, not a fill, so it
+    /// reads distinctly from `spokenRange`'s filled highlight.
+    var selectionOutline: NSRange? = nil
     /// When true the view is an editable input (no marking); Enter commits.
     var isEditable: Bool = false
     /// Fire `onSelect` on a plain click, not just a drag-selection — Listen's
@@ -2595,6 +2606,7 @@ private struct SelectableText: NSViewRepresentable {
         textView.markers = isEditable ? [] : highlights.filter { NSMaxRange($0.range) <= length }
         textView.markerColor = highlightColor
         textView.spokenMarker = (isEditable ? nil : spokenRange).flatMap { NSMaxRange($0) <= length ? $0 : nil }
+        textView.selectionOutline = (isEditable ? nil : selectionOutline).flatMap { NSMaxRange($0) <= length ? $0 : nil }
         textView.needsDisplay = true
 
         // Deterministic content height (text + width), floored and capped — past
@@ -2766,8 +2778,8 @@ private struct ListenTextPane: View {
             height: $height,
             width: QuickTranslateView.width - 32,
             maxHeight: 240,
-            highlights: model.listenHighlights,
             spokenRange: spoken.range,
+            selectionOutline: model.listenSelection,
             isEditable: false,
             picksOnPlainClick: true,
             onTextChange: { _ in },

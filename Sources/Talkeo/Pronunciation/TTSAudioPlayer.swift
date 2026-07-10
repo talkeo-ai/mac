@@ -38,6 +38,11 @@ final class TTSAudioPlayer: NSObject, ObservableObject, @unchecked Sendable {
     @Published private(set) var failed = false
     @Published private(set) var progress: Double = 0
     @Published private(set) var duration: Double = 0
+    /// Confines playback to a sub-range of the clip (fractions 0...1) —
+    /// Listen's "play just this part," like a video editor's in/out points.
+    /// While set, reaching the end rewinds to the start and pauses instead of
+    /// continuing into the rest of the clip.
+    @Published private(set) var playbackWindow: ClosedRange<Double>?
     /// Observed by the text view to highlight the current word (per-word updates).
     let spoken = SpokenWord()
 
@@ -150,6 +155,7 @@ final class TTSAudioPlayer: NSObject, ObservableObject, @unchecked Sendable {
         progress = 0
         duration = 0
         spoken.range = nil
+        playbackWindow = nil
     }
 
     /// Scrub to a fraction of the clip and keep the current play/pause state.
@@ -159,6 +165,12 @@ final class TTSAudioPlayer: NSObject, ObservableObject, @unchecked Sendable {
         player.currentTime = f * duration
         progress = f
         updateSpokenWord()
+    }
+
+    /// Set (or clear) the sub-range playback is confined to. `nil` returns to
+    /// playing the whole clip normally.
+    func setPlaybackWindow(_ window: ClosedRange<Double>?) {
+        playbackWindow = window
     }
 
     func setRate(_ rate: Float) {
@@ -191,6 +203,13 @@ final class TTSAudioPlayer: NSObject, ObservableObject, @unchecked Sendable {
     private func tick() {
         guard let player, duration > 0 else { return }
         progress = min(1, player.currentTime / duration)
+        if let window = playbackWindow, progress >= window.upperBound - 0.0008 {
+            // Reached the end of the selected range: rewind to its start and
+            // stop there, rather than playing into the rest of the clip.
+            seek(toFraction: window.lowerBound)
+            pause()
+            return
+        }
         updateSpokenWord()
     }
 

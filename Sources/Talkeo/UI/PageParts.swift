@@ -30,6 +30,9 @@ struct PlainTextEditor: NSViewRepresentable {
     /// Word currently being spoken (Listen): drawn in accent on top of any
     /// markers, karaoke-style. `nil` everywhere else.
     var spokenRange: NSRange? = nil
+    /// The selected range (Listen): drawn as an outline, not a fill, so it
+    /// reads distinctly from `spokenRange`'s filled highlight.
+    var selectionOutline: NSRange? = nil
     /// Return commits (e.g. Listen's "play this"); Shift+Return still inserts
     /// a real line break. `nil` (Translate's/Improve's default) leaves Return
     /// as a plain newline.
@@ -109,6 +112,7 @@ struct PlainTextEditor: NSViewRepresentable {
         textView.markers = markers.filter { NSMaxRange($0.range) <= length }
         textView.markerColor = markerColor
         textView.spokenMarker = spokenRange.flatMap { NSMaxRange($0) <= length ? $0 : nil }
+        textView.selectionOutline = selectionOutline.flatMap { NSMaxRange($0) <= length ? $0 : nil }
         textView.needsDisplay = true
     }
 

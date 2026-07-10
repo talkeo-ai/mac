@@ -5,8 +5,10 @@ import AppKit
 /// copies (`WordSelectingTextView`, `ShortcutTextView`) each half-had:
 ///
 /// - **Markers**: rounded highlights behind picked words (`markers`), an
-///   optional override fill (`markerColor`, Improve's diff tint), and the
-///   karaoke marker for the word being spoken (`spokenMarker`, Listen).
+///   optional override fill (`markerColor`, Improve's diff tint), the
+///   karaoke marker for the word being spoken (`spokenMarker`, Listen), and
+///   Listen's selected range drawn as an outline rather than a fill
+///   (`selectionOutline`) so it stays legible under the moving spoken marker.
 /// - **Pick on settle**: `mouseDown` runs AppKit's whole selection drag loop;
 ///   when it returns the selection is final and `onWordPick` fires with the
 ///   selection snapped to whole words. Read-only views then collapse the OS
@@ -45,6 +47,10 @@ final class MarkerTextView: NSTextView {
     var markerColor: NSColor?
     /// Word currently being spoken (Listen) — drawn in accent, karaoke-style.
     var spokenMarker: NSRange?
+    /// The selected range (Listen): drawn as an outline, not a fill — reads
+    /// distinctly from `spokenMarker`'s filled highlight even when they cover
+    /// the same span (right after picking, before playback moves on).
+    var selectionOutline: NSRange?
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { acceptsFirstMouseEnabled }
 
@@ -101,6 +107,7 @@ final class MarkerTextView: NSTextView {
 
     override func draw(_ dirtyRect: NSRect) {
         drawMarkers()
+        drawSelectionOutline()
         drawSpokenMarker()
         super.draw(dirtyRect)
     }
@@ -130,6 +137,28 @@ final class MarkerTextView: NSTextView {
                 fill.setFill()
                 NSBezierPath(roundedRect: frame, xRadius: 6, yRadius: 6).fill()
             }
+        }
+    }
+
+    /// The selected range's boundary — a stroked outline, not a fill, so a
+    /// pick and the spoken-word highlight covering the same span still read
+    /// as two different things.
+    private func drawSelectionOutline() {
+        guard let selectionOutline, selectionOutline.length > 0,
+              NSMaxRange(selectionOutline) <= (string as NSString).length,
+              let lm = layoutManager, let tc = textContainer else { return }
+        let origin = textContainerOrigin
+        let glyphRange = lm.glyphRange(forCharacterRange: selectionOutline, actualCharacterRange: nil)
+        lm.enumerateEnclosingRects(
+            forGlyphRange: glyphRange,
+            withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+            in: tc
+        ) { rect, _ in
+            let frame = rect.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: -3, dy: -1)
+            let path = NSBezierPath(roundedRect: frame, xRadius: 7, yRadius: 7)
+            path.lineWidth = 1.5
+            Palette.nsForeground.withAlphaComponent(0.45).setStroke()
+            path.stroke()
         }
     }
 
