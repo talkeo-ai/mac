@@ -14,6 +14,11 @@ final class BarTooltipPanel {
     private let panel: NSPanel
     private var showTimer: Timer?
     private var lastHiddenAt: CFTimeInterval = 0
+    /// The rect the visible tip points at, kept so a late content re-measure
+    /// can re-derive the window origin (see `watchContentSize`).
+    private var currentTarget: NSRect?
+    /// Observes the current content view's frame while the tip is up.
+    private var contentFrameObserver: NSObjectProtocol?
 
     /// Radix/shadcn's default `delayDuration` (700ms) — long enough to never
     /// bother a user who already knows the buttons, short enough to answer a
@@ -40,6 +45,17 @@ final class BarTooltipPanel {
         panel.isOpaque = false
         panel.ignoresMouseEvents = true // never steal clicks or the cursor
         self.panel = panel
+
+        // Warm up the SwiftUI hosting machinery once, while nothing is
+        // visible. The very first `NSHostingView` measured in a session
+        // reports pre-render metrics from `fittingSize` (the graph's initial
+        // update hasn't run yet), so the session's first tip was framed from
+        // a wrong size — it appeared "in the air" and then visibly jumped
+        // once the real size landed. Fresh hosting views measure fine after
+        // this one absorbs the warm-up cost.
+        let warmup = NSHostingView(rootView: BarTooltipView(text: "warm-up"))
+        warmup.layoutSubtreeIfNeeded()
+        _ = warmup.fittingSize
     }
 
     /// Ask for the tip on a (new) button. Applies the delay/sticky rules.
@@ -62,6 +78,7 @@ final class BarTooltipPanel {
     func hide() {
         showTimer?.invalidate()
         showTimer = nil
+        currentTarget = nil
         guard panel.isVisible else { return }
         lastHiddenAt = CACurrentMediaTime()
         panel.orderOut(nil)
@@ -71,19 +88,51 @@ final class BarTooltipPanel {
     /// centered on it. Swapping text while visible repositions with no fade.
     private func present(text: String, anchor: () -> NSRect?) {
         guard let target = anchor() else { return }
+        currentTarget = target
         let hosting = NSHostingView(rootView: BarTooltipView(text: text))
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
         hosting.frame = NSRect(origin: .zero, size: size)
         panel.contentView = hosting
-        let origin = NSPoint(
-            x: target.minX - size.width,
-            y: target.midY - size.height / 2
-        )
-        panel.setFrame(NSRect(origin: origin, size: size), display: true)
+        // Everything is measured and framed BEFORE the window is ordered
+        // front, and `watchContentSize` keeps it that way if the content
+        // settles late — no pixel ever shows at a stale frame.
+        panel.setFrame(frame(for: size, at: target), display: true)
+        watchContentSize(of: hosting)
         // The entrance is animated by the SwiftUI content itself (fade + zoom
         // from the tail side, shadcn-style), so the window just appears.
         panel.orderFrontRegardless()
+    }
+
+    /// Window frame that puts the tail on the target's left edge, vertically
+    /// centered on it.
+    private func frame(for size: NSSize, at target: NSRect) -> NSRect {
+        NSRect(
+            x: target.minX - size.width,
+            y: target.midY - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    /// Keep the tip glued to its target if the content re-measures after the
+    /// window is up. Insurance behind the init warm-up: should the hosting
+    /// view still settle on its real size only after the first render (its
+    /// sizing constraints then resize the panel around a now-stale origin),
+    /// re-derive the frame from the stored target. Any such correction lands
+    /// while the content is still transparent — the entrance animation defers
+    /// its fade-in by a run-loop turn — so it's never seen as a jump.
+    private func watchContentSize(of hosting: NSView) {
+        if let contentFrameObserver { NotificationCenter.default.removeObserver(contentFrameObserver) }
+        hosting.postsFrameChangedNotifications = true
+        contentFrameObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification, object: hosting, queue: .main
+        ) { [weak self] note in
+            guard let self, self.panel.isVisible, let target = self.currentTarget,
+                  let size = (note.object as? NSView)?.frame.size else { return }
+            let frame = self.frame(for: size, at: target)
+            if self.panel.frame != frame { self.panel.setFrame(frame, display: true) }
+        }
     }
 }
 
