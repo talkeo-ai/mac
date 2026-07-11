@@ -12,6 +12,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let permission = AccessibilityPermission()
     private let settings: SettingsStore = LocalSettingsStore.shared
 
+    /// Where the next capture's recognized text lands: the popover (floating
+    /// bar's Capture) or the main window (a page's own Capture button).
+    /// Captures are one-at-a-time, so a single flag carries the origin
+    /// through the async crosshair → preview → verb hop.
+    private enum CaptureDestination { case popover, mainWindow }
+    private var captureDestination: CaptureDestination = .popover
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Compact translate + learn popover. (The selection tooltip still exists
         // in the tree but stays disconnected for now.)
@@ -20,6 +27,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The main app window: opened at launch (normal-app behavior), from the
         // bar's brand button, and on Dock/Finder reopen.
         mainWindow = MainWindowController()
+        // The pages' Capture buttons run the same TCC-gated flow as the
+        // floating bar's; the preview's verbs then route the recognized text
+        // back into the main window instead of the popover.
+        mainWindow.onPageCapture = { [weak self] in self?.captureScreen(destination: .mainWindow) }
 
         // Selection UI is the persistent right-edge floating bar; its Translate
         // reads the current selection on demand.
@@ -30,14 +41,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         floatingBar.onListen = { [weak self] in self?.listenCurrentSelection() }
         floatingBar.onCapture = { [weak self] in self?.captureScreen() }
 
-        // Capture's verbs land in the same popover entry points as the bar's
-        // own buttons — the preview resolves WHICH text (in-image selection
-        // vs. full transcript); the routing lives here where both panels are
-        // owned.
+        // Capture's verbs land in the popover (bar-initiated) or the main
+        // window (page-initiated) — the preview resolves WHICH text (in-image
+        // selection vs. full transcript); the routing lives here where all
+        // the panels are owned.
         capturePreview = CapturePreviewPanel()
-        capturePreview.onTranslate = { [weak self] text in self?.quickTranslate.show(text: text) }
-        capturePreview.onImprove = { [weak self] text in self?.quickTranslate.improve(text: text) }
-        capturePreview.onListen = { [weak self] text in self?.quickTranslate.listen(text: text) }
+        capturePreview.onTranslate = { [weak self] text in self?.routeCapturedText(text, verb: .translate) }
+        capturePreview.onImprove = { [weak self] text in self?.routeCapturedText(text, verb: .improve) }
+        capturePreview.onListen = { [weak self] text in self?.routeCapturedText(text, verb: .listen) }
         // An auto-hiding bar must never retract from under its open popover.
         quickTranslate.onVisibilityChange = { [weak self] visible in
             self?.floatingBar.setHoldRevealed(visible)
@@ -172,22 +183,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Route a capture's recognized text where the capture was initiated
+    /// from: the popover's entry points (floating bar) or the tapped verb's
+    /// page in the main window.
+    private func routeCapturedText(_ text: String, verb: TextVerb) {
+        switch captureDestination {
+        case .popover:
+            switch verb {
+            case .translate: quickTranslate.show(text: text)
+            case .improve: quickTranslate.improve(text: text)
+            case .listen: quickTranslate.listen(text: text)
+            }
+        case .mainWindow:
+            mainWindow.openPage(verb: verb, capturedText: text)
+        }
+    }
+
     /// Runs the interactive region capture and opens the Live Text preview.
-    /// Talkeo's own chrome (popover, an earlier preview, the bar) hides first
-    /// so it can't end up inside the screenshot; the bar restores whatever
-    /// the outcome.
-    private func captureScreen() {
+    /// Talkeo's own chrome (popover, an earlier preview, the bar — plus the
+    /// main window for a page-initiated capture, since it likely fills the
+    /// screen) hides first so it can't end up inside the screenshot;
+    /// everything restores whatever the outcome.
+    private func captureScreen(destination: CaptureDestination = .popover) {
         guard ScreenRecordingPermission.ensureAccess() else {
             showScreenRecordingDeniedAlert()
             return
         }
+        captureDestination = destination
         quickTranslate.hide()
         capturePreview.hide() // a re-capture supersedes an open preview
+        let mainWasVisible = destination == .mainWindow && mainWindow.isWindowVisible
+        if mainWasVisible { mainWindow.hideForCapture() }
         let barWasVisible = floatingBar.isVisible
         if barWasVisible { floatingBar.hide() } // poll-proof: evaluate() guards on featureVisible
         screenCapturer.captureInteractive { [weak self] outcome in
             guard let self else { return }
             if barWasVisible { self.floatingBar.show() }
+            if mainWasVisible { self.mainWindow.show() }
             switch outcome {
             case .cancelled:
                 break // Esc in the crosshair — a user choice, stay silent

@@ -8,13 +8,11 @@ import SwiftUI
 
 /// State for the in-app translator. Mirrors the popover's flow (detect EN/ES,
 /// stream deltas, record history) but is its own model: text is typed rather
-/// than captured, translation re-runs debounced as you type, and the language
-/// pair can be pinned manually (the popover always auto-detects). Owned by
+/// than captured, and translation re-runs debounced as you type. Owned by
 /// `MainWindowModel` so switching sections doesn't lose the text.
 final class TranslatePageModel: ObservableObject {
-    /// Explicit language pair override; `nil` = auto-detect per translation.
-    @Published var pinnedSource: String?
-    /// Detected source ("EN"/"ES") of the last translation, for the Auto chip.
+    /// Detected source ("EN"/"ES") of the last translation — feeds the
+    /// header's passive direction label.
     @Published private(set) var detected: String?
     @Published var sourceText = ""
     @Published private(set) var outputText = ""
@@ -44,18 +42,10 @@ final class TranslatePageModel: ObservableObject {
         self.session = ExplainSession(client: client)
     }
 
-    /// Source of the *next* translation: pinned, else last detection, else ES
-    /// (the placeholder direction — the user's language into English).
-    var effectiveSource: String { pinnedSource ?? detected ?? "ES" }
+    /// Source of the *next* translation: last detection, else ES (the
+    /// placeholder direction — the user's language into English).
+    var effectiveSource: String { detected ?? "ES" }
     var targetLang: String { effectiveSource == "EN" ? "ES" : "EN" }
-
-    var sourceChipLabel: String {
-        if let pinnedSource { return QuickTranslateModel.languageName(pinnedSource) }
-        if let detected { return "Auto · \(QuickTranslateModel.languageName(detected))" }
-        return "Detect language"
-    }
-
-    var targetChipLabel: String { QuickTranslateModel.languageName(targetLang) }
 
     /// Debounced translate-as-you-type, Google Translate style.
     func sourceEdited() {
@@ -87,9 +77,9 @@ final class TranslatePageModel: ObservableObject {
         let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
-        let src = pinnedSource ?? QuickTranslateModel.detectLanguage(text)
+        let src = QuickTranslateModel.detectLanguage(text)
         let tgt = src == "EN" ? "ES" : "EN"
-        detected = pinnedSource == nil ? src : nil
+        detected = src
         errorMessage = nil
         outputText = ""
         isStreaming = true
@@ -112,35 +102,33 @@ final class TranslatePageModel: ObservableObject {
         }
     }
 
-    /// Swap the pair. Like Google Translate, the last translation becomes the
-    /// new input so the swap is immediately useful.
-    func swap() {
-        let newSource = targetLang
-        pinnedSource = newSource
-        detected = nil
-        if !outputText.isEmpty { sourceText = outputText }
-        translateNow()
-    }
-
-    func pinSource(_ lang: String?) {
-        pinnedSource = lang
-        translateNow()
-    }
-
-    func pinTarget(_ lang: String) {
-        pinSource(lang == "EN" ? "ES" : "EN")
-    }
-
     /// Load a history entry back into the translator (no re-request).
     func select(_ entry: HistoryEntry) {
         debounceTask?.cancel()
         streamTask?.cancel()
         generation += 1
         clearSelection()
-        pinnedSource = nil
         detected = entry.detectedLang
         sourceText = entry.source
         outputText = entry.target
+        isStreaming = false
+        errorMessage = nil
+    }
+
+    /// Programmatic text handoff (captured text routed from the capture
+    /// preview): replace the source without auto-translating. The old output
+    /// is dropped — it belonged to the old text — and nothing runs until the
+    /// user triggers it. Unchanged text is a no-op, so re-capturing the same
+    /// text keeps the last result.
+    func replaceSource(_ text: String) {
+        guard text != sourceText else { return }
+        debounceTask?.cancel()
+        streamTask?.cancel()
+        generation += 1
+        clearSelection()
+        detected = nil
+        sourceText = text
+        outputText = ""
         isStreaming = false
         errorMessage = nil
     }
@@ -202,9 +190,9 @@ final class TranslatePageModel: ObservableObject {
     }
 }
 
-/// The in-app translator: Google Translate distilled — language chips over
-/// their panes with a swap on the gutter, side-by-side source/translation
-/// panes, translate-as-you-type, and a collapsible history drawer on the
+/// The in-app translator: Google Translate distilled — side-by-side
+/// source/translation panes, translate-as-you-type with automatic EN↔ES
+/// detection (no chips, no swap), and a collapsible history drawer on the
 /// right. The space under the panes is reserved for selected meanings
 /// (explain cards, mirroring the popover's select-to-learn).
 struct TranslatePage: View {
@@ -212,10 +200,14 @@ struct TranslatePage: View {
     /// Observed directly: the session is its own ObservableObject and its
     /// changes don't bubble through the model.
     @ObservedObject var session: ExplainSession
+    /// The screen-capture entry point, injected by the window (the TCC-gated
+    /// flow lives in the AppDelegate); nil hides the button.
+    let onCapture: (() -> Void)?
 
-    init(model: TranslatePageModel) {
+    init(model: TranslatePageModel, onCapture: (() -> Void)? = nil) {
         self.model = model
         self.session = model.session
+        self.onCapture = onCapture
     }
 
     var body: some View {
@@ -232,6 +224,51 @@ struct TranslatePage: View {
             }
         }
         .onAppear { model.refreshHistory() }
+    }
+
+    private var translator: some View {
+        VStack(spacing: 16) {
+            PageTitleHeader(
+                title: "Translate",
+                subtitle: "Translate between English and Spanish — direction is detected automatically."
+            ) {
+                if let onCapture { CaptureButton(action: onCapture) }
+                HistoryToggle(isOpen: model.historyOpen) {
+                    model.historyOpen.toggle()
+                    // The popover writes to the same store while this page
+                    // is mounted — re-read on open so it's never stale.
+                    if model.historyOpen { model.refreshHistory() }
+                }
+            } detail: {
+                if let detected = model.detected,
+                   !model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("\(QuickTranslateModel.languageName(detected)) → \(QuickTranslateModel.languageName(model.targetLang))")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Palette.tertiary)
+                }
+            }
+
+            // No language chips or swap cluster: detection is automatic and
+            // bidirectional EN↔ES, so the panes sit at the top and never
+            // move. The header shows the detected direction passively on its
+            // subtitle line.
+            HStack(alignment: .top, spacing: 14) {
+                sourcePane
+                outputPane
+            }
+            .frame(height: 240)
+
+            actionBar
+
+            // Selected meanings: pick a word in either pane and it's taught
+            // here (the popover's select-to-learn, at home in the app).
+            cardArea
+        }
+        .padding(.horizontal, 48)
+        .padding(.top, 32)
+        .padding(.bottom, 24)
+        .frame(maxWidth: PageGrid.maxWidth)
+        .frame(maxWidth: .infinity)
         // Cmd+Return forces an immediate translation (skips the debounce).
         .background(
             Button("") { model.translateNow() }
@@ -240,83 +277,37 @@ struct TranslatePage: View {
         )
     }
 
-    private var translator: some View {
-        VStack(spacing: 16) {
-            ZStack {
-                languageBar
-                HStack {
-                    Spacer()
-                    HistoryToggle(isOpen: model.historyOpen) { model.historyOpen.toggle() }
+    /// The explicit run bar, mirroring Improve's CTA. Translation still runs
+    /// debounced as you type — the button is the visible trigger (and the
+    /// ⌘⏎ badge's home) for users who paste and expect a "go".
+    private var actionBar: some View {
+        let hasText = !model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // Disabled reads muted, not faded: tertiary label on the secondary
+        // surface, matching how native controls gray out.
+        let ctaText = hasText ? Palette.primaryForeground : Palette.tertiary
+        return HStack {
+            Spacer()
+            Button(action: { model.translateNow() }) {
+                HStack(spacing: 6) {
+                    Text("Translate")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("⌘⏎")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(ctaText.opacity(0.75))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(ctaText.opacity(0.18)))
                 }
-            }
-
-            HStack(alignment: .top, spacing: 14) {
-                sourcePane
-                outputPane
-            }
-            .frame(height: 240)
-
-            // Selected meanings: pick a word in either pane and it's taught
-            // here (the popover's select-to-learn, at home in the app).
-            cardArea
-        }
-        .padding(.horizontal, 48)
-        .padding(.top, 40)
-        .padding(.bottom, 24)
-        .frame(maxWidth: 960)
-        .frame(maxWidth: .infinity)
-    }
-
-    /// Source chip · swap · target chip. The swap is pinned to the column's
-    /// exact center — the gutter between the two panes — via equal flexible
-    /// halves; centering the cluster as a whole would drift it with the chips'
-    /// widths ("Detect language" is wider than "English").
-    private var languageBar: some View {
-        HStack(spacing: 10) {
-            sourceMenu
-                .frame(maxWidth: .infinity, alignment: .trailing)
-
-            Button(action: { model.swap() }) {
-                Image(systemName: "arrow.left.arrow.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Palette.muted)
-                    .frame(width: 30, height: 30)
-                    .background(Circle().fill(Palette.elevated))
-                    .contentShape(Circle())
+                .foregroundStyle(ctaText)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(hasText ? Palette.primary : Palette.elevated))
             }
             .buttonStyle(.plain)
-            .help("Swap languages")
-
-            targetMenu
-                .frame(maxWidth: .infinity, alignment: .leading)
+            .disabled(!hasText)
+            .handCursor()
         }
-    }
-
-    private var sourceMenu: some View {
-        Menu {
-            Button("Detect language") { model.pinSource(nil) }
-            Button("English") { model.pinSource("EN") }
-            Button("Spanish") { model.pinSource("ES") }
-        } label: {
-            LangChip(text: model.sourceChipLabel)
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-    }
-
-    private var targetMenu: some View {
-        Menu {
-            Button("English") { model.pinTarget("EN") }
-            Button("Spanish") { model.pinTarget("ES") }
-        } label: {
-            LangChip(text: model.targetChipLabel)
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
     }
 
     private var sourcePane: some View {
@@ -567,25 +558,6 @@ private struct ExplainCardPane: View {
                 .padding(.vertical, 6)
                 .background(Capsule().stroke(Palette.border, lineWidth: 1))
         }
-    }
-}
-
-private struct LangChip: View {
-    let text: String
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Text(text)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Palette.foreground)
-            Image(systemName: "chevron.down")
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(Palette.tertiary)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(Capsule().fill(Palette.elevated))
-        .contentShape(Capsule())
     }
 }
 

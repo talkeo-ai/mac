@@ -85,6 +85,16 @@ final class ImprovePageModel: ObservableObject {
         result = ImproveResult(improved: entry.improved, changes: entry.changes)
     }
 
+    /// Programmatic text handoff (captured text routed from the capture
+    /// preview): replace the source without running. Same invalidation as
+    /// typing — the old diff belonged to the old text. Unchanged text is a
+    /// no-op, so re-capturing the same text keeps the last result.
+    func replaceSource(_ text: String) {
+        guard text != sourceText else { return }
+        sourceText = text
+        sourceEdited()
+    }
+
     func refreshHistory() {
         entries = history.all()
     }
@@ -137,6 +147,9 @@ final class ImprovePageModel: ObservableObject {
 
 struct ImprovePage: View {
     @ObservedObject var model: ImprovePageModel
+    /// The screen-capture entry point, injected by the window (the TCC-gated
+    /// flow lives in the AppDelegate); nil hides the button.
+    var onCapture: (() -> Void)? = nil
 
     /// The popover's diff tint (its constant is private to that surface).
     private static let diffColor = NSColor.systemRed.withAlphaComponent(0.32)
@@ -154,18 +167,15 @@ struct ImprovePage: View {
             }
         }
         .onAppear { model.refreshHistory() }
-        // ⌘⏎ runs the rewrite (same shortcut as Translate's force-translate).
-        .background(
-            Button("") { model.improveNow() }
-                .keyboardShortcut(.return, modifiers: .command)
-                .hidden()
-        )
     }
 
     private var improver: some View {
         VStack(spacing: 16) {
-            HStack {
-                Spacer()
+            PageTitleHeader(
+                title: "Improve",
+                subtitle: "Rewrite your English to sound natural — see what changed and why."
+            ) {
+                if let onCapture { CaptureButton(action: onCapture) }
                 HistoryToggle(isOpen: model.historyOpen) {
                     model.historyOpen.toggle()
                     // The popover writes to the same store while this page is
@@ -185,10 +195,16 @@ struct ImprovePage: View {
             changesArea
         }
         .padding(.horizontal, 48)
-        .padding(.top, 40)
+        .padding(.top, 32)
         .padding(.bottom, 24)
-        .frame(maxWidth: 960)
+        .frame(maxWidth: PageGrid.maxWidth)
         .frame(maxWidth: .infinity)
+        // ⌘⏎ runs the rewrite (same shortcut as Translate's force-translate).
+        .background(
+            Button("") { model.improveNow() }
+                .keyboardShortcut(.return, modifiers: .command)
+                .hidden()
+        )
     }
 
     private var sourcePane: some View {

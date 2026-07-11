@@ -176,8 +176,15 @@ struct SpeakerButton: View {
     }
 }
 
+/// The shared width cap for the verb pages' content grids — a wide,
+/// Google-Translate-like working surface rather than a narrow centered
+/// column.
+enum PageGrid {
+    static let maxWidth: CGFloat = 1400
+}
+
 /// Labeled toggle for the history drawer — icon + text so it doesn't read as
-/// decoration.
+/// decoration. Sized to match the header's other capsule actions (Capture).
 struct HistoryToggle: View {
     let isOpen: Bool
     let action: () -> Void
@@ -192,14 +199,93 @@ struct HistoryToggle: View {
                     .font(.system(size: 13, weight: .semibold))
             }
             .foregroundStyle(isOpen || isHover ? Palette.foreground : Palette.muted)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
             .background(Capsule().fill(Palette.elevated))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .onHover { isHover = $0 }
         .help(isOpen ? "Hide history" : "Show history")
+    }
+}
+
+/// Vercel-style page header shared by the verb pages: a large title row with
+/// the page's actions trailing, and a one-line subtitle underneath with an
+/// optional passive detail (e.g. Translate's detected direction) on its
+/// trailing edge. Every piece is one fixed line, so nothing below ever shifts.
+struct PageTitleHeader<Actions: View, Detail: View>: View {
+    let title: String
+    let subtitle: String
+    @ViewBuilder var actions: Actions
+    @ViewBuilder var detail: Detail
+
+    init(
+        title: String,
+        subtitle: String,
+        @ViewBuilder actions: () -> Actions,
+        @ViewBuilder detail: () -> Detail
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.actions = actions()
+        self.detail = detail()
+    }
+
+    init(
+        title: String,
+        subtitle: String,
+        @ViewBuilder actions: () -> Actions
+    ) where Detail == EmptyView {
+        self.init(title: title, subtitle: subtitle, actions: actions) { EmptyView() }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.system(size: 22, weight: .semibold))
+                    .tracking(-0.3)
+                    .foregroundStyle(Palette.foreground)
+                Spacer()
+                actions
+            }
+            HStack(alignment: .firstTextBaseline) {
+                Text(subtitle)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Palette.muted)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer()
+                detail
+            }
+        }
+    }
+}
+
+/// "Bring text from the screen": icon + label, quiet capsule matching the
+/// history toggle it sits beside in the page headers.
+struct CaptureButton: View {
+    let action: () -> Void
+    @State private var isHover = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "text.viewfinder")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("Capture")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .foregroundStyle(isHover ? Palette.foreground : Palette.muted)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(Capsule().fill(Palette.elevated))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHover = $0 }
+        .help("Capture text from screen")
     }
 }
 
