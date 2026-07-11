@@ -18,27 +18,52 @@ final class MainWindowController: NSObject {
         installMainMenuIfNeeded()
     }
 
-    /// Deep-link for the popover's "Full history": land on Translate with the
-    /// history drawer open.
+    /// Deep-link for the popover's "Full history": the Translate page with
+    /// its history drawer open.
     func openTranslateHistory() {
         model.translate.historyOpen = true
+        // The page may already be mounted (no onAppear) while the popover was
+        // writing to the shared store, so the drawer re-reads it here.
+        model.translate.refreshHistory()
         show(section: .translate)
     }
 
-    /// Same deep-link for Improve's compose bar: land on Improve with the
-    /// drawer open. Refreshed here because the page may already be mounted
-    /// (no onAppear) while the popover was writing to the shared store.
+    /// Same deep-link for Improve's compose bar — its page, drawer open.
     func openImproveHistory() {
         model.improve.historyOpen = true
         model.improve.refreshHistory()
         show(section: .improve)
     }
 
-    /// Deep-link for the popover's Listen "Full history": land on Listen with
-    /// the history drawer open.
+    /// Deep-link for the popover's Listen "Full history" — its page, drawer
+    /// open.
     func openListenHistory() {
         model.listen.historyOpen = true
+        model.listen.refreshHistory()
         show(section: .listen)
+    }
+
+    /// The pages' Capture buttons route through here — the AppDelegate
+    /// injects the TCC-gated capture flow (same seam as the deep-links).
+    var onPageCapture: (() -> Void)? {
+        get { model.onCaptureRequest }
+        set { model.onCaptureRequest = newValue }
+    }
+
+    /// Captured text handed back by the AppDelegate: land on `verb`'s page
+    /// with the text as its source. Not auto-run — each page's own CTA stays
+    /// the trigger.
+    func openPage(verb: TextVerb, capturedText: String) {
+        model.insertCaptured(capturedText, verb: verb)
+        show(section: MainSection(verb))
+    }
+
+    /// Whether the window is on screen — a page-initiated capture hides it
+    /// so Talkeo doesn't cover what the user wants to grab.
+    var isWindowVisible: Bool { window?.isVisible ?? false }
+
+    func hideForCapture() {
+        window?.orderOut(nil)
     }
 
     /// Order the main window front and focus the app. Pass a section to land
@@ -130,65 +155,91 @@ final class MainWindowController: NSObject {
 
 // MARK: - Navigation
 
-/// Sections of the main window's left-hand rail: AI conversation (chat,
-/// voice teacher), the floating bar's tools, the user-facing record
-/// (transcript, estimated English level), and settings pinned at the bottom.
+/// The three text verbs — the feature pages a captured text can land on.
+/// Narrower than `MainSection` (no Chat/Progress/Settings): the capture
+/// preview's buttons and the pages' `replaceSource` handoff only ever target
+/// these three.
+enum TextVerb {
+    case translate, improve, listen
+}
+
+/// Sections of the main window's left-hand rail: the three text verbs as
+/// separate features, AI conversation (chat, voice teacher), the user-facing
+/// record (Progress), and settings pinned at the bottom.
 enum MainSection: String, CaseIterable, Identifiable {
-    case chat, teacher, translate, improve, listen, capture, transcript, englishLevel, settings
+    case translate, improve, listen, chat, teacher, progress, settings
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .chat: return "Chat"
-        case .teacher: return "Teacher"
         case .translate: return "Translate"
         case .improve: return "Improve"
         case .listen: return "Listen"
-        case .capture: return "Capture"
-        case .transcript: return "Transcript"
-        case .englishLevel: return "English level"
+        case .chat: return "Chat"
+        case .teacher: return "Teacher"
+        case .progress: return "Progress"
         case .settings: return "Settings"
-        }
-    }
-
-    /// Short label for the narrow icon rail (the page keeps the full title).
-    var railTitle: String {
-        switch self {
-        case .englishLevel: return "Level"
-        default: return title
         }
     }
 
     var icon: String {
         switch self {
+        case .translate: return "character.bubble.fill"
+        // Same glyph as the floating bar's Improve button — one icon per verb
+        // across surfaces.
+        case .improve: return "text.badge.checkmark"
+        case .listen: return "waveform"
         case .chat: return "bubble.left.and.bubble.right.fill"
         case .teacher: return "graduationcap.fill"
-        case .translate: return "character.bubble.fill"
-        case .improve: return "text.badge.checkmark"
-        case .listen: return "speaker.wave.2.fill"
-        case .capture: return "camera.viewfinder"
-        case .transcript: return "waveform"
-        case .englishLevel: return "chart.bar.fill"
+        case .progress: return "chart.bar.fill"
         case .settings: return "gearshape.fill"
         }
     }
 
+    static let verbs: [MainSection] = [.translate, .improve, .listen]
     static let ai: [MainSection] = [.chat, .teacher]
-    static let tools: [MainSection] = [.translate, .improve, .listen, .capture]
-    static let progress: [MainSection] = [.transcript, .englishLevel]
+
+    /// The rail section hosting a capture/deep-link verb.
+    init(_ verb: TextVerb) {
+        switch verb {
+        case .translate: self = .translate
+        case .improve: self = .improve
+        case .listen: self = .listen
+        }
+    }
 }
 
 // MARK: - Root view (SPA: icon rail + floating content card)
 
 /// Shared navigation state: the controller writes it for deep-links, the rail
-/// writes it on clicks, the detail pane reads it. Owns the per-section models
-/// that should survive switching sections (e.g. the translator keeps its text).
+/// writes it on clicks, the detail pane reads it. Owns the per-page models
+/// and the capture seam, so switching sections loses nothing (e.g. the
+/// translator keeps its text).
 final class MainWindowModel: ObservableObject {
     @Published var selection: MainSection = .translate
     let translate = TranslatePageModel()
     let improve = ImprovePageModel()
     let listen = ListenPageModel()
+
+    /// Injected by the AppDelegate (same seam as the popover deep-links): the
+    /// pages' Capture buttons run the TCC-gated screen-capture flow, whose
+    /// text comes back through `insertCaptured(_:verb:)`.
+    var onCaptureRequest: (() -> Void)?
+
+    func requestCapture() {
+        onCaptureRequest?()
+    }
+
+    /// Captured text lands in `verb`'s page as its source, without
+    /// auto-running anything — the page's own CTA stays the trigger.
+    func insertCaptured(_ text: String, verb: TextVerb) {
+        switch verb {
+        case .translate: translate.replaceSource(text)
+        case .improve: improve.replaceSource(text)
+        case .listen: listen.replaceSource(text)
+        }
+    }
 }
 
 struct MainWindowView: View {
@@ -221,21 +272,19 @@ struct MainWindowView: View {
 
     private var rail: some View {
         VStack(spacing: 6) {
+            ForEach(MainSection.verbs) { item in
+                RailItem(item: item, isSelected: model.selection == item) { model.selection = item }
+            }
+
+            railDivider
+
             ForEach(MainSection.ai) { item in
                 RailItem(item: item, isSelected: model.selection == item) { model.selection = item }
             }
 
             railDivider
 
-            ForEach(MainSection.tools) { item in
-                RailItem(item: item, isSelected: model.selection == item) { model.selection = item }
-            }
-
-            railDivider
-
-            ForEach(MainSection.progress) { item in
-                RailItem(item: item, isSelected: model.selection == item) { model.selection = item }
-            }
+            RailItem(item: .progress, isSelected: model.selection == .progress) { model.selection = .progress }
 
             Spacer(minLength: 0)
 
@@ -258,6 +307,12 @@ struct MainWindowView: View {
     @ViewBuilder
     private var detail: some View {
         switch model.selection {
+        case .translate:
+            TranslatePage(model: model.translate, onCapture: { model.requestCapture() })
+        case .improve:
+            ImprovePage(model: model.improve, onCapture: { model.requestCapture() })
+        case .listen:
+            ListenPage(model: model.listen, onCapture: { model.requestCapture() })
         case .chat:
             ToolPage(
                 section: .chat,
@@ -272,28 +327,8 @@ struct MainWindowView: View {
                 steps: [],
                 comingSoon: true
             )
-        case .translate:
-            TranslatePage(model: model.translate)
-        case .improve:
-            ImprovePage(model: model.improve)
-        case .listen:
-            ListenPage(model: model.listen)
-        case .capture:
-            ToolPage(
-                section: .capture,
-                summary: "Grab text straight from the screen — even where you can't select.",
-                steps: [],
-                comingSoon: true
-            )
-        case .transcript:
-            ToolPage(
-                section: .transcript,
-                summary: "Real-time transcription of what you hear — live subtitles for meetings, videos and calls.",
-                steps: [],
-                comingSoon: true
-            )
-        case .englishLevel:
-            EnglishLevelPage()
+        case .progress:
+            ProgressPage()
         case .settings:
             ToolPage(
                 section: .settings,
@@ -319,7 +354,7 @@ private struct RailItem: View {
                 Image(systemName: item.icon)
                     .font(.system(size: 19, weight: .medium))
                     .frame(height: 22)
-                Text(item.railTitle)
+                Text(item.title)
                     .font(.system(size: 10.5, weight: .semibold))
             }
             .foregroundStyle(isSelected ? Palette.foreground : Palette.muted)
@@ -400,46 +435,81 @@ private struct StepsList: View {
     }
 }
 
-// MARK: - English level
+// MARK: - Progress
 
-/// The user's estimated English level. No signal is collected yet, so this is
-/// the honest empty state over the CEFR scale; estimation from real usage
-/// (translations, improvements) comes later.
-private struct EnglishLevelPage: View {
+/// The user-facing record: estimated English level and (soon) the listening
+/// transcript, stacked as sections of one page. Level is the honest empty
+/// state over the CEFR scale — estimation from real usage (translations,
+/// improvements) comes later; Transcript is coming soon.
+private struct ProgressPage: View {
     private static let levels = ["A1", "A2", "B1", "B2", "C1", "C2"]
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 PageHeader(
-                    section: .englishLevel,
-                    subtitle: "Talkeo estimates your level from how you actually use English."
+                    section: .progress,
+                    subtitle: "Your English over time — estimated level and everything you've heard."
                 )
 
-                HStack(spacing: 8) {
-                    ForEach(Self.levels, id: \.self) { level in
-                        Text(level)
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(Palette.tertiary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 16)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(Palette.elevated)
-                            )
-                    }
-                }
-                .frame(maxWidth: 560)
+                VStack(alignment: .leading, spacing: 16) {
+                    sectionHeader(
+                        title: "English level",
+                        subtitle: "Talkeo estimates your level from how you actually use English."
+                    )
 
-                Text("Not enough data yet. Keep translating, improving and listening — your estimated level will appear here.")
-                    .font(.system(size: 14))
-                    .foregroundStyle(Palette.muted)
+                    HStack(spacing: 8) {
+                        ForEach(Self.levels, id: \.self) { level in
+                            Text(level)
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundStyle(Palette.tertiary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 16)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .fill(Palette.elevated)
+                                )
+                        }
+                    }
+                    .frame(maxWidth: 560)
+
+                    Text("Not enough data yet. Keep translating, improving and listening — your estimated level will appear here.")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Palette.muted)
+                }
+
+                Divider().overlay(Palette.border)
+
+                VStack(alignment: .leading, spacing: 16) {
+                    sectionHeader(
+                        title: "Transcript",
+                        subtitle: "Real-time transcription of what you hear — live subtitles for meetings, videos and calls."
+                    )
+
+                    Text("Coming soon")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Palette.muted)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(Palette.elevated))
+                }
             }
             .frame(maxWidth: 680, alignment: .leading)
             .padding(.horizontal, 56)
             .padding(.top, 56)
             .padding(.bottom, 48)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func sectionHeader(title: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(Palette.foreground)
+            Text(subtitle)
+                .font(.system(size: 14))
+                .foregroundStyle(Palette.muted)
         }
     }
 }
