@@ -72,14 +72,14 @@ struct PlainTextEditor: NSViewRepresentable {
         }
 
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 4
+        paragraph.lineSpacing = 5
         textView.defaultParagraphStyle = paragraph
         textView.typingAttributes = [
-            .font: NSFont.systemFont(ofSize: 16),
+            .font: NSFont.systemFont(ofSize: 18),
             .foregroundColor: Palette.nsForeground,
             .paragraphStyle: paragraph,
         ]
-        textView.font = .systemFont(ofSize: 16)
+        textView.font = .systemFont(ofSize: 18)
         textView.string = text
 
         let scroll = NSScrollView()
@@ -194,13 +194,13 @@ struct HistoryToggle: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                 Text("History")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
             }
             .foregroundStyle(isOpen || isHover ? Palette.foreground : Palette.muted)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
+            .padding(.horizontal, 15)
+            .padding(.vertical, 10)
             .background(Capsule().fill(Palette.elevated))
             .contentShape(Capsule())
         }
@@ -241,18 +241,18 @@ struct PageTitleHeader<Actions: View, Detail: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
                 Text(title)
-                    .font(.system(size: 22, weight: .semibold))
-                    .tracking(-0.3)
+                    .font(.system(size: 27, weight: .semibold))
+                    .tracking(-0.4)
                     .foregroundStyle(Palette.foreground)
                 Spacer()
                 actions
             }
             HStack(alignment: .firstTextBaseline) {
                 Text(subtitle)
-                    .font(.system(size: 13))
+                    .font(.system(size: 15))
                     .foregroundStyle(Palette.muted)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -273,19 +273,60 @@ struct CaptureButton: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: "text.viewfinder")
-                    .font(.system(size: 12, weight: .semibold))
-                Text("Capture")
                     .font(.system(size: 13, weight: .semibold))
+                Text("Capture")
+                    .font(.system(size: 14, weight: .semibold))
             }
             .foregroundStyle(isHover ? Palette.foreground : Palette.muted)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
+            .padding(.horizontal, 15)
+            .padding(.vertical, 10)
             .background(Capsule().fill(Palette.elevated))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .onHover { isHover = $0 }
         .help("Capture text from screen")
+    }
+}
+
+/// A paper sheet with a folded top-right corner (rounded elsewhere) — the
+/// document silhouette of the pages' wireframe empty-state illustrations.
+struct SheetShape: Shape {
+    var radius: CGFloat = 14
+    var fold: CGFloat = 26
+
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let w = rect.width, h = rect.height, r = radius, c = fold
+        p.move(to: CGPoint(x: r, y: 0))
+        p.addLine(to: CGPoint(x: w - c, y: 0))
+        p.addLine(to: CGPoint(x: w, y: c))
+        p.addLine(to: CGPoint(x: w, y: h - r))
+        p.addArc(center: CGPoint(x: w - r, y: h - r), radius: r,
+                 startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false)
+        p.addLine(to: CGPoint(x: r, y: h))
+        p.addArc(center: CGPoint(x: r, y: h - r), radius: r,
+                 startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false)
+        p.addLine(to: CGPoint(x: 0, y: r))
+        p.addArc(center: CGPoint(x: r, y: r), radius: r,
+                 startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
+        p.closeSubpath()
+        return p
+    }
+}
+
+/// The little turned-down triangle at the sheet's cut corner.
+struct FoldFlap: Shape {
+    var fold: CGFloat = 26
+
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let w = rect.width, c = fold
+        p.move(to: CGPoint(x: w - c, y: 0))
+        p.addLine(to: CGPoint(x: w, y: c))
+        p.addLine(to: CGPoint(x: w - c, y: c))
+        p.closeSubpath()
+        return p
     }
 }
 

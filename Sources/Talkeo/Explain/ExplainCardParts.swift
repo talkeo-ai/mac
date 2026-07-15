@@ -38,6 +38,9 @@ struct ExplainExamplesList<Speaker: View>: View {
     /// `.top` hugs the speaker to the first line (popover); `.center` sits it
     /// between the pair (app).
     var speakerAlignment: VerticalAlignment = .top
+    /// A small bullet at each pair's leading edge, so multiple examples read
+    /// as a structured list (the app's roomier card); off on the popover.
+    var showsMarkers = false
     /// Builds the surface's speaker button for the (markdown-stripped)
     /// English text of an example.
     @ViewBuilder var speaker: (String) -> Speaker
@@ -46,21 +49,34 @@ struct ExplainExamplesList<Speaker: View>: View {
         VStack(alignment: .leading, spacing: rowSpacing) {
             ForEach(examples.indices, id: \.self) { i in
                 let ex = examples[i]
-                HStack(alignment: speakerAlignment, spacing: 6) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        ExplainCardText.bold(ex.source)
-                            .font(.system(size: sourceSize))
-                            .foregroundStyle(Palette.foreground)
-                            .lineSpacing(3)
-                            .fixedSize(horizontal: false, vertical: true)
-                        ExplainCardText.bold(ex.target)
-                            .font(.system(size: targetSize))
-                            .foregroundStyle(Palette.muted)
-                            .lineSpacing(3)
-                            .fixedSize(horizontal: false, vertical: true)
+                // The marker rides its own top-aligned rail so it hugs the
+                // first line even when the speaker centers on the pair.
+                HStack(alignment: .top, spacing: 0) {
+                    if showsMarkers {
+                        Circle()
+                            .fill(Palette.tertiary)
+                            .frame(width: 5, height: 5)
+                            // Optically centered on the source line's cap
+                            // height, whatever the surface's font size.
+                            .padding(.top, sourceSize * 0.45)
+                            .padding(.trailing, 10)
                     }
-                    Spacer(minLength: 4)
-                    speaker(ExplainCardText.plainSpoken(ex.source))
+                    HStack(alignment: speakerAlignment, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ExplainCardText.bold(ex.source)
+                                .font(.system(size: sourceSize))
+                                .foregroundStyle(Palette.foreground)
+                                .lineSpacing(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                            ExplainCardText.bold(ex.target)
+                                .font(.system(size: targetSize))
+                                .foregroundStyle(Palette.muted)
+                                .lineSpacing(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 4)
+                        speaker(ExplainCardText.plainSpoken(ex.source))
+                    }
                 }
             }
         }
